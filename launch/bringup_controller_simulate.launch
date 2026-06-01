@@ -1,0 +1,26 @@
+<launch>
+    <!-- 加载配置参数 -->
+    <rosparam command="load" file="$(find indooruav_controller)/config/config.yaml" />
+
+    <!--
+        mav_frame=LOCAL_NED：MAVROS setpoint_velocity/cmd_vel 期望 ENU 输入，
+        自动转换为 NED 发送给 PX4。
+        controller_simulate 在 OnVelSendTimer 中已将机体 FLU 速度旋转到 ENU，
+        故此处必须使用 LOCAL_NED（原 BODY_NED 会导致沿全局轴飞行）。
+    -->
+    <param name="/solo_0/mavros/setpoint_velocity/mav_frame" value="LOCAL_NED" />
+
+    <!-- 启动控制器仿真节点 -->
+    <node name="controller_simulate_node" pkg="indooruav_controller" type="controller_simulate_node" output="screen" />
+
+    <!-- 包含 indooruav_simulate 包中的 msg_MID360.launch -->
+    <include file="$(find indooruav_simulate)/launch/msg_MID360.launch" />
+    <!-- 包含 indooruav_simulate 包中的 px4.launch -->
+    <include file="$(find indooruav_simulate)/launch/px4.launch" />
+
+    <!-- Gazebo 真值位姿 → PX4 vision_pose（零噪声定位，绝对稳定） -->
+    <node name="gazebo_truth_bridge" pkg="indooruav_simulate" type="gazebo_truth_bridge.py" output="screen" />
+
+    <!-- 将 Odometry_global 话题转发为 Odometry_global_rotate -->
+    <node name="odom_global_relay" pkg="topic_tools" type="relay" args="Odometry_global Odometry_global_rotate" />
+</launch>

@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="config_file"
+       default="$(find indooruav_controller)/config/config.yaml"/>
+
+  <!--
+    config.yaml 自带顶层键 indooruav_controller:
+    这里需要全局加载，才能匹配代码里使用的绝对参数路径
+    /indooruav_controller/...
+  -->
+  <rosparam command="load" file="$(arg config_file)"/>
+
+  <node pkg="indooruav_controller"
+        type="controller_hardware_node"
+        name="controller_hardware"
+        output="screen"
+        required="true"/>
+</launch>

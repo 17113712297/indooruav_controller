@@ -1,0 +1,61 @@
+indooruav_controller:
+  services:
+    takeoff: "indooruav_controller/controller_hardware/takeoff"
+    land:    "indooruav_controller/controller_hardware/land"
+    hover:   "indooruav_controller/controller_hardware/hover"
+
+    notify_uav_open_light:  "indooruav_controller/controller_hardware/light_open"
+    notify_uav_close_light: "indooruav_controller/controller_hardware/light_close"
+    notify_uav_auto_light:  "indooruav_controller/controller_hardware/light_auto"
+
+    notify_uav_video_recording_start: "indooruav_controller/controller_hardware/camera_video_start"
+    notify_uav_video_recording_stop:  "indooruav_controller/controller_hardware/camera_video_stop"
+    camera_mode_photo: "indooruav_controller/controller_hardware/camera_mode_photo"
+    camera_mode_video: "indooruav_controller/controller_hardware/camera_mode_video"
+    camera_shoot:      "indooruav_controller/controller_hardware/camera_photo_shoot"
+    camera_video_config: "indooruav_controller/controller_hardware/camera_video_config"
+    camera_zoom:         "indooruav_controller/controller_hardware/camera_zoom"
+
+    gimbal_yaw_follow: "indooruav_controller/controller_hardware/gimbal_yaw_follow"
+    gimbal_angle:      "indooruav_controller/controller_hardware/gimbal_angle"
+
+    takeoff_complete: "indooruav_core/state_machine_event/takeoff_complete"
+    land_complete:    "indooruav_core/state_machine_event/land_complete"
+    hover_complete:   "indooruav_core/state_machine_event/hover_complete"
+
+    waypoint_record: "indooruav_controller/waypoint_recorder/record"
+    waypoint_save:   "indooruav_controller/waypoint_recorder/save"
+    waypoint_clear:  "indooruav_controller/waypoint_recorder/clear"
+
+  topics:
+    cmd_vel: "indooruav_controller/waypoint_tracker/cmd_vel"
+
+  parameters:
+    vel_send_rate_hz: 10.0
+
+  # ── 仿真模式（GPS 定位版）────────────────────────────────
+  simulate:
+    services:
+      takeoff: "indooruav_controller/controller_simulate/takeoff"
+      land:    "indooruav_controller/controller_simulate/land"
+      hover:   "indooruav_controller/controller_simulate/hover"
+
+    topics:
+      cmd_vel_sub:      "indooruav_controller/waypoint_tracker/cmd_vel"
+      cmd_vel_pub:      "/solo_0/mavros/setpoint_velocity/cmd_vel"
+      # 位置 setpoint 改用 setpoint_raw/local（支持 IGNORE_YAW，起飞不转头）
+      setpoint_raw_pub: "/solo_0/mavros/setpoint_raw/local"
+      mavros_state_sub: "/solo_0/mavros/state"
+      local_pose_sub:   "/solo_0/mavros/local_position/pose"
+
+    mavros:
+      arming:   "/solo_0/mavros/cmd/arming"
+      set_mode: "/solo_0/mavros/set_mode"
+
+    parameters:
+      vel_send_rate_hz:       30.0
+      takeoff_altitude:       2.5
+      warmup_setpoint_count:  100
+      takeoff_timeout_sec:    20.0
+      request_retry_sec:      1.0
+
