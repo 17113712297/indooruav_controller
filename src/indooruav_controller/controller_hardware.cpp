@@ -4,7 +4,12 @@
  */
 #include "indooruav_controller/controller_hardware.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 
 namespace indooruav_controller {
@@ -39,6 +44,8 @@ constexpr char kDefaultCameraModeVideoService[] =
     "indooruav_controller/controller_hardware/camera_mode_video";
 constexpr char kDefaultCameraShootService[] =
     "indooruav_controller/controller_hardware/camera_photo_shoot";
+constexpr char kDefaultUploadMissionPhotosFromSdService[] =
+    "indooruav_controller/controller_hardware/upload_mission_photos_from_sd";
 constexpr char kDefaultCameraVideoConfigService[] =
     "indooruav_controller/controller_hardware/camera_video_config";
 constexpr char kDefaultCameraZoomService[] =
@@ -62,6 +69,8 @@ constexpr char kDefaultWaypointSaveService[] =
     "indooruav_controller/waypoint_recorder/save";
 constexpr char kDefaultWaypointClearService[] =
     "indooruav_controller/waypoint_recorder/clear";
+constexpr char kDefaultHttpUploadImageBytesService[] =
+    "/indooruav_http/upload_image_bytes";
 
 constexpr char kDefaultCmdVelTopic[] = "indooruav_controller/waypoint_tracker/cmd_vel";
 
@@ -87,6 +96,7 @@ ControllerHardware::ControllerHardware(ros::NodeHandle& node_handle)
     // 初始化 PSDK 通道前注册必须先于此处的 Application 完成 PSDK 平台初始化，
     // 由 main() 保证调用顺序。
     InitializePsdkChannel();
+    InitializeCameraManager();
 
     AdvertiseServiceServers();
     CreateServiceClients();
@@ -140,6 +150,9 @@ void ControllerHardware::LoadParameters() {
     node_handle_.param<std::string>("/indooruav_controller/services/camera_shoot",
                                     camera_shoot_service_name_,
                                     kDefaultCameraShootService);
+    node_handle_.param<std::string>("/indooruav_controller/services/upload_mission_photos_from_sd",
+                                    upload_mission_photos_from_sd_service_name_,
+                                    kDefaultUploadMissionPhotosFromSdService);
     node_handle_.param<std::string>("/indooruav_controller/services/camera_video_config",
                                     camera_video_config_service_name_,
                                     kDefaultCameraVideoConfigService);
@@ -174,12 +187,21 @@ void ControllerHardware::LoadParameters() {
     node_handle_.param<std::string>("/indooruav_controller/services/waypoint_clear",
                                     waypoint_clear_service_name_,
                                     kDefaultWaypointClearService);
+    node_handle_.param<std::string>("/indooruav_controller/services/http_upload_image_bytes",
+                                    http_upload_image_bytes_service_name_,
+                                    kDefaultHttpUploadImageBytesService);
 
     // 话题 + 频率
     node_handle_.param<std::string>("/indooruav_controller/topics/cmd_vel",
                                     cmd_vel_topic_, kDefaultCmdVelTopic);
     node_handle_.param<double>("/indooruav_controller/parameters/vel_send_rate_hz",
                                vel_send_rate_hz_, 10.0);
+    node_handle_.param<int>("/indooruav_controller/parameters/media_camera_mount_position",
+                            media_camera_mount_position_, -1);
+    node_handle_.param<double>("/indooruav_controller/parameters/media_time_tolerance_sec",
+                               media_time_tolerance_sec_, 5.0);
+    node_handle_.param<double>("/indooruav_controller/parameters/media_file_wait_timeout_sec",
+                               media_file_wait_timeout_sec_, 60.0);
     if (vel_send_rate_hz_ < 1.0) {
         vel_send_rate_hz_ = 1.0;
     }
@@ -199,6 +221,27 @@ void ControllerHardware::InitializePsdkChannel() {
                   static_cast<unsigned long long>(ret));
         throw std::runtime_error("DjiLowSpeedDataChannel_RegRecvDataCallback failed");
     }
+}
+
+bool ControllerHardware::InitializeCameraManager() {
+    const T_DjiReturnCode ret = DjiCameraManager_Init();
+    if (ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        ROS_ERROR("[ControllerHardware] DjiCameraManager_Init failed: 0x%08llX",
+                  static_cast<unsigned long long>(ret));
+        camera_manager_initialized_.store(false);
+        return false;
+    }
+
+    camera_manager_initialized_.store(true);
+    ROS_INFO("[ControllerHardware] camera manager initialized");
+    return true;
+}
+
+bool ControllerHardware::EnsureCameraManagerReady() {
+    if (camera_manager_initialized_.load()) {
+        return true;
+    }
+    return InitializeCameraManager();
 }
 
 void ControllerHardware::AdvertiseServiceServers() {
@@ -237,6 +280,9 @@ void ControllerHardware::AdvertiseServiceServers() {
     camera_shoot_service_server_ = node_handle_.advertiseService(
         camera_shoot_service_name_,
         &ControllerHardware::CameraShootCallback, this);
+    upload_mission_photos_from_sd_service_server_ = node_handle_.advertiseService(
+        upload_mission_photos_from_sd_service_name_,
+        &ControllerHardware::UploadMissionPhotosFromSdCallback, this);
     camera_video_config_service_server_ = node_handle_.advertiseService(
         camera_video_config_service_name_,
         &ControllerHardware::CameraVideoConfigCallback, this);
@@ -263,6 +309,7 @@ void ControllerHardware::AdvertiseServiceServers() {
     ROS_INFO_STREAM("[ControllerHardware] cam photo:  " << camera_mode_photo_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] cam video:  " << camera_mode_video_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] cam shoot:  " << camera_shoot_service_name_);
+    ROS_INFO_STREAM("[ControllerHardware] media upload: " << upload_mission_photos_from_sd_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] cam vcfg:   " << camera_video_config_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] cam zoom:   " << camera_zoom_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] gimbal yf:  " << gimbal_yaw_follow_service_name_);
@@ -284,6 +331,8 @@ void ControllerHardware::CreateServiceClients() {
         node_handle_.serviceClient<std_srvs::Trigger>(waypoint_save_service_name_);
     waypoint_clear_client_ =
         node_handle_.serviceClient<std_srvs::Trigger>(waypoint_clear_service_name_);
+    upload_image_bytes_client_ =
+        node_handle_.serviceClient<indooruav_msgs::UploadImageBytes>(http_upload_image_bytes_service_name_);
 
     ROS_INFO_STREAM("[ControllerHardware] takeoff_complete: " << takeoff_complete_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] land_complete:    " << land_complete_service_name_);
@@ -291,6 +340,7 @@ void ControllerHardware::CreateServiceClients() {
     ROS_INFO_STREAM("[ControllerHardware] wp record: " << waypoint_record_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] wp save:   " << waypoint_save_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] wp clear:  " << waypoint_clear_service_name_);
+    ROS_INFO_STREAM("[ControllerHardware] http upload image bytes: " << http_upload_image_bytes_service_name_);
 }
 
 void ControllerHardware::CreateSubscribersAndTimers() {
@@ -670,6 +720,146 @@ bool ControllerHardware::CameraShootCallback(
     return true;
 }
 
+bool ControllerHardware::UploadMissionPhotosFromSdCallback(
+    indooruav_msgs::TransferMissionMedia::Request& request,
+    indooruav_msgs::TransferMissionMedia::Response& response) {
+    response.result_code = 1;
+    response.matched_count = 0;
+    response.uploaded_count = 0;
+    response.failed_count = 0;
+
+    if (request.airline_key.empty() || request.detect_time_cur.empty()) {
+        ROS_WARN("[ControllerHardware] SD transfer skipped because airline_key or detect_time_cur is empty");
+        response.result_code = 3;
+        return true;
+    }
+
+    if (media_camera_mount_position_ < 0 ||
+        media_camera_mount_position_ == DJI_MOUNT_POSITION_UNKNOWN) {
+        ROS_WARN("[ControllerHardware] SD transfer skipped because media_camera_mount_position is not configured");
+        response.result_code = 3;
+        return true;
+    }
+
+    if (sd_transfer_running_.exchange(true)) {
+        ROS_WARN("[ControllerHardware] SD transfer ignored because another transfer is still running");
+        response.result_code = 3;
+        return true;
+    }
+
+    struct RunningGuard {
+        std::atomic<bool>& flag;
+        ~RunningGuard() {
+            flag.store(false);
+        }
+    } running_guard{sd_transfer_running_};
+
+    if (!EnsureCameraManagerReady()) {
+        response.result_code = 2;
+        return true;
+    }
+
+    const E_DjiMountPosition mount_position =
+        static_cast<E_DjiMountPosition>(media_camera_mount_position_);
+    const T_DjiReturnCode reg_ret =
+        DjiCameraManager_RegDownloadFileDataCallback(mount_position,
+                                                     &ControllerHardware::StaticDownloadFileDataCallback);
+    if (reg_ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        ROS_WARN("[ControllerHardware] Failed to register media download callback: 0x%08llX",
+                 static_cast<unsigned long long>(reg_ret));
+        response.result_code = 2;
+        return true;
+    }
+
+    const T_DjiReturnCode rights_ret = DjiCameraManager_ObtainDownloaderRights(mount_position);
+    if (rights_ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        ROS_WARN("[ControllerHardware] Failed to obtain downloader rights: 0x%08llX",
+                 static_cast<unsigned long long>(rights_ret));
+        response.result_code = 2;
+        return true;
+    }
+
+    struct RightsGuard {
+        E_DjiMountPosition mount_position;
+        ~RightsGuard() {
+            const T_DjiReturnCode ret = DjiCameraManager_ReleaseDownloaderRights(mount_position);
+            if (ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+                ROS_WARN("[ControllerHardware] Failed to release downloader rights: 0x%08llX",
+                         static_cast<unsigned long long>(ret));
+            }
+        }
+    } rights_guard{mount_position};
+
+    T_DjiCameraManagerFileList file_list{};
+    const T_DjiReturnCode list_ret = DjiCameraManager_DownloadFileList(mount_position, &file_list);
+    if (list_ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        ROS_WARN("[ControllerHardware] Failed to download camera file list: 0x%08llX",
+                 static_cast<unsigned long long>(list_ret));
+        response.result_code = 2;
+        return true;
+    }
+
+    const std::time_t mission_start_unix = ParseDetectTimeCur(request.detect_time_cur);
+    if (mission_start_unix <= 0) {
+        ROS_WARN("[ControllerHardware] Failed to parse detectTimeCur for SD transfer: %s",
+                 request.detect_time_cur.c_str());
+        response.result_code = 3;
+        return true;
+    }
+    const std::time_t workflow_end_unix =
+        std::time(nullptr) + static_cast<std::time_t>(std::ceil(std::max(0.0, media_time_tolerance_sec_)));
+
+    std::vector<T_DjiCameraManagerFileListInfo> matched_files;
+    matched_files.reserve(file_list.totalCount);
+    for (uint16_t i = 0; i < file_list.totalCount; ++i) {
+        const T_DjiCameraManagerFileListInfo& file_info = file_list.fileListInfo[i];
+        if (!IsSupportedMediaType(file_info.type)) {
+            continue;
+        }
+        if (!IsMediaInMissionWindow(file_info, mission_start_unix, workflow_end_unix)) {
+            continue;
+        }
+        matched_files.push_back(file_info);
+    }
+
+    std::sort(matched_files.begin(), matched_files.end(),
+              [this](const T_DjiCameraManagerFileListInfo& left,
+                     const T_DjiCameraManagerFileListInfo& right) {
+                  const std::time_t left_time = FileCreateTimeToUnix(left.createTime);
+                  const std::time_t right_time = FileCreateTimeToUnix(right.createTime);
+                  if (left_time != right_time) {
+                      return left_time < right_time;
+                  }
+                  return left.fileIndex < right.fileIndex;
+              });
+
+    response.matched_count = static_cast<int32_t>(matched_files.size());
+    if (matched_files.empty()) {
+        ROS_INFO("[ControllerHardware] SD transfer found no matching photos for detectTimeCur=%s",
+                 request.detect_time_cur.c_str());
+        return true;
+    }
+
+    for (const T_DjiCameraManagerFileListInfo& file_info : matched_files) {
+        if (UploadMediaFile(file_info, request.airline_key, request.detect_time_cur)) {
+            ++response.uploaded_count;
+        } else {
+            ++response.failed_count;
+        }
+    }
+
+    if (response.failed_count > 0) {
+        response.result_code = 2;
+    }
+
+    ROS_INFO("[ControllerHardware] SD transfer finished for detectTimeCur=%s matched=%d uploaded=%d failed=%d",
+             request.detect_time_cur.c_str(),
+             response.matched_count,
+             response.uploaded_count,
+             response.failed_count);
+    return true;
+}
+
 bool ControllerHardware::CameraVideoConfigCallback(
     indooruav_msgs::CameraVideoConfig::Request& request,
     indooruav_msgs::CameraVideoConfig::Response& /*response*/) {
@@ -778,6 +968,241 @@ bool ControllerHardware::SendFrame(const uint8_t* buf, uint8_t len) {
     const T_DjiReturnCode ret = DjiLowSpeedDataChannel_SendData(
         DJI_CHANNEL_ADDRESS_MASTER_RC_APP, buf, len);
     return ret == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+}
+
+T_DjiReturnCode ControllerHardware::StaticDownloadFileDataCallback(T_DjiDownloadFilePacketInfo packet_info,
+                                                                   const uint8_t* data,
+                                                                   uint16_t data_len) {
+    if (instance_ != nullptr) {
+        return instance_->OnDownloadFileData(packet_info, data, data_len);
+    }
+    return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+}
+
+T_DjiReturnCode ControllerHardware::OnDownloadFileData(T_DjiDownloadFilePacketInfo packet_info,
+                                                       const uint8_t* data,
+                                                       uint16_t data_len) {
+    std::lock_guard<std::mutex> lock(download_mutex_);
+    if (active_download_file_indices_.count(packet_info.fileIndex) == 0) {
+        return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+    }
+
+    switch (packet_info.downloadFileEvent) {
+        case DJI_DOWNLOAD_FILE_EVENT_START:
+            download_buffer_.clear();
+            download_error_message_.clear();
+            download_finished_ = false;
+            download_success_ = false;
+            downloading_file_index_ = packet_info.fileIndex;
+            break;
+        case DJI_DOWNLOAD_FILE_EVENT_TRANSFER:
+            if (data != nullptr && data_len > 0) {
+                download_buffer_.insert(download_buffer_.end(), data, data + data_len);
+            }
+            break;
+        case DJI_DOWNLOAD_FILE_EVENT_END:
+            download_finished_ = true;
+            download_success_ = true;
+            active_download_file_indices_.erase(packet_info.fileIndex);
+            download_cv_.notify_all();
+            break;
+        case DJI_DOWNLOAD_FILE_EVENT_START_TRANSFER_END:
+            download_finished_ = true;
+            download_success_ = true;
+            active_download_file_indices_.erase(packet_info.fileIndex);
+            download_cv_.notify_all();
+            break;
+        default:
+            break;
+    }
+
+    return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+}
+
+bool ControllerHardware::IsSupportedMediaType(E_DjiCameraMediaFileType media_type) const {
+    return media_type == DJI_CAMERA_FILE_TYPE_JPEG ||
+           media_type == DJI_CAMERA_FILE_TYPE_DNG ||
+           media_type == DJI_CAMERA_FILE_TYPE_TIFF;
+}
+
+bool ControllerHardware::UploadMediaFile(const T_DjiCameraManagerFileListInfo& file_info,
+                                         const std::string& airline_key,
+                                         const std::string& detect_time_cur) {
+    std::vector<uint8_t> file_bytes;
+    std::string error_message;
+    if (!DownloadFileToBuffer(file_info.fileIndex, &file_bytes, &error_message)) {
+        ROS_WARN("[ControllerHardware] Failed to download media file index=%u name=%s: %s",
+                 file_info.fileIndex,
+                 file_info.fileName,
+                 error_message.c_str());
+        return false;
+    }
+
+    return UploadDownloadedBytes(file_info, file_bytes, airline_key, detect_time_cur);
+}
+
+bool ControllerHardware::UploadDownloadedBytes(const T_DjiCameraManagerFileListInfo& file_info,
+                                               const std::vector<uint8_t>& file_bytes,
+                                               const std::string& airline_key,
+                                               const std::string& detect_time_cur) {
+    if (file_bytes.empty()) {
+        ROS_WARN("[ControllerHardware] Skip uploading empty media bytes for file index=%u name=%s",
+                 file_info.fileIndex,
+                 file_info.fileName);
+        return false;
+    }
+
+    indooruav_msgs::UploadImageBytes service;
+    service.request.airline_key = airline_key;
+    service.request.detect_time_cur = detect_time_cur;
+    service.request.source_name = file_info.fileName;
+    service.request.image_extension = DetectMediaExtension(file_info);
+    service.request.image_bytes = file_bytes;
+
+    if (!upload_image_bytes_client_.call(service)) {
+        ROS_WARN("[ControllerHardware] Failed to call http upload image bytes service for file index=%u",
+                 file_info.fileIndex);
+        return false;
+    }
+
+    if (service.response.result_code != 1) {
+        ROS_WARN("[ControllerHardware] HTTP upload image bytes returned resultCode=%d for file index=%u",
+                 service.response.result_code,
+                 file_info.fileIndex);
+        return false;
+    }
+
+    ROS_INFO("[ControllerHardware] Uploaded SD-card media file index=%u name=%s",
+             file_info.fileIndex,
+             file_info.fileName);
+    return true;
+}
+
+bool ControllerHardware::DownloadFileToBuffer(uint32_t file_index,
+                                              std::vector<uint8_t>* buffer,
+                                              std::string* error_message) {
+    if (buffer == nullptr || error_message == nullptr) {
+        return false;
+    }
+
+    const E_DjiMountPosition mount_position =
+        static_cast<E_DjiMountPosition>(media_camera_mount_position_);
+
+    {
+        std::lock_guard<std::mutex> lock(download_mutex_);
+        download_buffer_.clear();
+        download_error_message_.clear();
+        downloading_file_index_ = file_index;
+        download_in_progress_ = true;
+        download_finished_ = false;
+        download_success_ = false;
+        active_download_file_indices_.insert(file_index);
+    }
+
+    const T_DjiReturnCode ret = DjiCameraManager_DownloadFileByIndex(mount_position, file_index);
+    if (ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        std::lock_guard<std::mutex> lock(download_mutex_);
+        active_download_file_indices_.erase(file_index);
+        download_in_progress_ = false;
+        *error_message = "DjiCameraManager_DownloadFileByIndex failed";
+        return false;
+    }
+
+    if (!WaitForDownloadResult(error_message)) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(download_mutex_);
+        *buffer = download_buffer_;
+        download_in_progress_ = false;
+    }
+    return true;
+}
+
+bool ControllerHardware::WaitForDownloadResult(std::string* error_message) {
+    if (error_message == nullptr) {
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(download_mutex_);
+    const bool finished = download_cv_.wait_for(
+        lock,
+        std::chrono::milliseconds(static_cast<int>(std::max(1.0, media_file_wait_timeout_sec_ * 1000.0))),
+        [this]() { return download_finished_; });
+
+    if (!finished) {
+        active_download_file_indices_.erase(downloading_file_index_);
+        download_in_progress_ = false;
+        *error_message = "download timed out";
+        return false;
+    }
+
+    if (!download_success_) {
+        download_in_progress_ = false;
+        *error_message = download_error_message_.empty() ? "download failed" : download_error_message_;
+        return false;
+    }
+
+    *error_message = "";
+    return true;
+}
+
+bool ControllerHardware::IsMediaInMissionWindow(const T_DjiCameraManagerFileListInfo& file_info,
+                                                std::time_t mission_start_unix,
+                                                std::time_t workflow_end_unix) const {
+    const std::time_t file_time = FileCreateTimeToUnix(file_info.createTime);
+    if (file_time <= 0) {
+        return false;
+    }
+
+    const std::time_t lower_bound =
+        mission_start_unix - static_cast<std::time_t>(std::ceil(std::max(0.0, media_time_tolerance_sec_)));
+    const std::time_t upper_bound =
+        workflow_end_unix + static_cast<std::time_t>(std::ceil(std::max(0.0, media_time_tolerance_sec_)));
+    return file_time >= lower_bound && file_time <= upper_bound;
+}
+
+std::time_t ControllerHardware::ParseDetectTimeCur(const std::string& detect_time_cur) const {
+    std::tm tm_value{};
+    std::istringstream ss(detect_time_cur);
+    ss >> std::get_time(&tm_value, "%Y%m%d%H%M%S");
+    if (ss.fail()) {
+        return static_cast<std::time_t>(0);
+    }
+    tm_value.tm_isdst = -1;
+    return std::mktime(&tm_value);
+}
+
+std::time_t ControllerHardware::FileCreateTimeToUnix(const T_DjiCameraManagerFileCreateTime& create_time) const {
+    std::tm tm_value{};
+    tm_value.tm_year = static_cast<int>(create_time.year) - 1900;
+    tm_value.tm_mon = static_cast<int>(create_time.month) - 1;
+    tm_value.tm_mday = static_cast<int>(create_time.day);
+    tm_value.tm_hour = static_cast<int>(create_time.hour);
+    tm_value.tm_min = static_cast<int>(create_time.minute);
+    tm_value.tm_sec = static_cast<int>(create_time.second);
+    tm_value.tm_isdst = -1;
+    return std::mktime(&tm_value);
+}
+
+std::string ControllerHardware::DetectMediaExtension(const T_DjiCameraManagerFileListInfo& file_info) const {
+    const std::string file_name(file_info.fileName);
+    const std::size_t dot_pos = file_name.find_last_of('.');
+    if (dot_pos != std::string::npos) {
+        return file_name.substr(dot_pos);
+    }
+
+    switch (file_info.type) {
+        case DJI_CAMERA_FILE_TYPE_JPEG:
+            return ".jpg";
+        case DJI_CAMERA_FILE_TYPE_DNG:
+            return ".dng";
+        case DJI_CAMERA_FILE_TYPE_TIFF:
+            return ".tiff";
+        default:
+            return ".bin";
+    }
 }
 
 void ControllerHardware::SetVelForwardingEnabled(bool enabled) {

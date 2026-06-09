@@ -26,16 +26,21 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <ctime>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <string>
+#include <vector>
 
 #include <ros/ros.h>
 #include <geometry_msgs/Twist.h>
 #include <std_srvs/Empty.h>
 #include <std_srvs/Trigger.h>
 
+#include <dji_camera_manager.h>
 #include <dji_low_speed_data_channel.h>
 #include <dji_platform.h>
 #include <dji_typedef.h>
@@ -44,6 +49,8 @@
 #include <indooruav_msgs/CameraZoom.h>
 #include <indooruav_msgs/GimbalAngle.h>
 #include <indooruav_msgs/GimbalYawFollow.h>
+#include <indooruav_msgs/TransferMissionMedia.h>
+#include <indooruav_msgs/UploadImageBytes.h>
 
 // =============================================================================
 // 协议层 (与 MSDK Kotlin 端共用同一套编解码规则)
@@ -348,6 +355,8 @@ private:
                                  std_srvs::Empty::Response& response);
     bool CameraShootCallback(std_srvs::Empty::Request& request,
                              std_srvs::Empty::Response& response);
+    bool UploadMissionPhotosFromSdCallback(indooruav_msgs::TransferMissionMedia::Request& request,
+                                           indooruav_msgs::TransferMissionMedia::Response& response);
     bool CameraVideoConfigCallback(indooruav_msgs::CameraVideoConfig::Request& request,
                                    indooruav_msgs::CameraVideoConfig::Response& response);
     bool CameraZoomCallback(indooruav_msgs::CameraZoom::Request& request,
@@ -364,7 +373,34 @@ private:
     bool CallEmptyService(ros::ServiceClient& client,
                           const std::string& service_name,
                           const char* service_label);
+    bool InitializeCameraManager();
+    bool EnsureCameraManagerReady();
+    bool IsSupportedMediaType(E_DjiCameraMediaFileType media_type) const;
+    bool UploadMediaFile(const T_DjiCameraManagerFileListInfo& file_info,
+                         const std::string& airline_key,
+                         const std::string& detect_time_cur);
+    bool UploadDownloadedBytes(const T_DjiCameraManagerFileListInfo& file_info,
+                               const std::vector<uint8_t>& file_bytes,
+                               const std::string& airline_key,
+                               const std::string& detect_time_cur);
+    bool DownloadFileToBuffer(uint32_t file_index,
+                              std::vector<uint8_t>* buffer,
+                              std::string* error_message);
+    bool WaitForDownloadResult(std::string* error_message);
+    bool IsMediaInMissionWindow(const T_DjiCameraManagerFileListInfo& file_info,
+                                std::time_t mission_start_unix,
+                                std::time_t workflow_end_unix) const;
+    std::time_t ParseDetectTimeCur(const std::string& detect_time_cur) const;
+    std::time_t FileCreateTimeToUnix(const T_DjiCameraManagerFileCreateTime& create_time) const;
+    std::string DetectMediaExtension(const T_DjiCameraManagerFileListInfo& file_info) const;
     void SetVelForwardingEnabled(bool enabled);
+
+    static T_DjiReturnCode StaticDownloadFileDataCallback(T_DjiDownloadFilePacketInfo packet_info,
+                                                          const uint8_t* data,
+                                                          uint16_t data_len);
+    T_DjiReturnCode OnDownloadFileData(T_DjiDownloadFilePacketInfo packet_info,
+                                       const uint8_t* data,
+                                       uint16_t data_len);
 
 private:
     // PSDK 回调单例指针 (DjiLowSpeedDataChannel 回调签名为 C 风格无 user_data，
@@ -388,6 +424,7 @@ private:
     std::string camera_mode_photo_service_name_;
     std::string camera_mode_video_service_name_;
     std::string camera_shoot_service_name_;
+    std::string upload_mission_photos_from_sd_service_name_;
     std::string camera_video_config_service_name_;
     std::string camera_zoom_service_name_;
 
@@ -401,9 +438,13 @@ private:
     std::string waypoint_record_service_name_;
     std::string waypoint_save_service_name_;
     std::string waypoint_clear_service_name_;
+    std::string http_upload_image_bytes_service_name_;
 
     std::string cmd_vel_topic_;
     double      vel_send_rate_hz_ = 10.0;
+    int         media_camera_mount_position_ = -1;
+    double      media_time_tolerance_sec_ = 5.0;
+    double      media_file_wait_timeout_sec_ = 60.0;
 
     // ── ROS 通信对象 ──────────────────────────────────────
     // 服务端
@@ -418,6 +459,7 @@ private:
     ros::ServiceServer camera_mode_photo_service_server_;
     ros::ServiceServer camera_mode_video_service_server_;
     ros::ServiceServer camera_shoot_service_server_;
+    ros::ServiceServer upload_mission_photos_from_sd_service_server_;
     ros::ServiceServer camera_video_config_service_server_;
     ros::ServiceServer camera_zoom_service_server_;
     ros::ServiceServer gimbal_yaw_follow_service_server_;
@@ -431,6 +473,7 @@ private:
     ros::ServiceClient waypoint_record_client_;
     ros::ServiceClient waypoint_save_client_;
     ros::ServiceClient waypoint_clear_client_;
+    ros::ServiceClient upload_image_bytes_client_;
 
     // 订阅 + 定时器
     ros::Subscriber cmd_vel_subscriber_;
@@ -449,6 +492,17 @@ private:
 
     // ACK 计数 (仅日志用)
     std::atomic<uint32_t> ack_count_{0};
+    std::atomic<bool> camera_manager_initialized_{false};
+    std::atomic<bool> sd_transfer_running_{false};
+    std::mutex download_mutex_;
+    std::condition_variable download_cv_;
+    uint32_t downloading_file_index_ = 0;
+    bool download_in_progress_ = false;
+    bool download_finished_ = false;
+    bool download_success_ = false;
+    std::vector<uint8_t> download_buffer_;
+    std::string download_error_message_;
+    std::set<uint32_t> active_download_file_indices_;
 };
 
 }  // namespace indooruav_controller
