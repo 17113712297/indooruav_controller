@@ -29,6 +29,17 @@ indooruav_controller:
     waypoint_clear:  "indooruav_controller/waypoint_recorder/clear"
     http_upload_image_bytes: "/indooruav_http/upload_image_bytes"
 
+    vision_check:   "indooruav_controller/controller_hardware/vision_check"
+    vision_landing: "indooruav_controller/controller_hardware/vision_landing"
+
+    check_passed: "indooruav_core/state_machine_event/check_passed"
+    check_failed: "indooruav_core/state_machine_event/check_failed"
+
+    # 辅助回调：同时通知 mission 节点（用于同步阻塞返回）
+    check_passed_aux: "indooruav_mission/preflight_check/check_passed"
+    check_failed_aux: "indooruav_mission/preflight_check/check_failed"
+    land_complete_aux: "indooruav_mission/landing/land_complete"
+
   topics:
     cmd_vel: "indooruav_controller/waypoint_tracker/cmd_vel"
 

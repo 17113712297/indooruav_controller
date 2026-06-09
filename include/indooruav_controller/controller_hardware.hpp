@@ -91,16 +91,27 @@ constexpr uint8_t CMD_AUX_LIGHT          = 0x31;  // 下视补光灯控制
 constexpr uint8_t CMD_RECORD_WAYPOINT  = 0x41;
 constexpr uint8_t CMD_SAVE_WAYPOINTS   = 0x42;
 constexpr uint8_t CMD_CLEAR_WAYPOINTS  = 0x43;
+// 任务/自动化 (Jetson → RC，0x5x 段)
+constexpr uint8_t CMD_CHECK_BEFORE_TAKEOFF = 0x50;  // 触发 RC 端起飞前抓手自检 (无载荷)
+constexpr uint8_t CMD_VISION_LANDING       = 0x51;  // 触发 RC 端 ArUco 视觉着陆 (无载荷)
 // 应答
 constexpr uint8_t CMD_ACK                    = 0x80;
 constexpr uint8_t CMD_ACK_TAKEOFF_COMPLETE   = 0x81;  // 起飞完成通知 (无载荷)
 constexpr uint8_t CMD_ACK_LAND_COMPLETE      = 0x82;  // 降落完成通知 (无载荷)
 constexpr uint8_t CMD_ACK_HOVER_COMPLETE     = 0x83;  // 悬停完成通知 (无载荷)
+constexpr uint8_t CMD_ACK_CHECK_PASSED       = 0x84;  // 起飞前自检通过 (无载荷)
+constexpr uint8_t CMD_ACK_CHECK_FAILED       = 0x85;  // 起飞前自检失败 (payload[0]=失败原因码)
 
 // ── ACK 状态码 ────────────────────────────────────────────
 constexpr uint8_t ACK_OK      = 0x00;
 constexpr uint8_t ACK_FAIL    = 0x01;
 constexpr uint8_t ACK_UNKNOWN = 0xFF;
+
+// ── 起飞前自检失败原因码 ──────────────────────────────────
+constexpr uint8_t CHECK_FAIL_REASON_GRIP_NOT_DETECTED = 0x01;
+constexpr uint8_t CHECK_FAIL_REASON_CV_ERROR          = 0x02;
+constexpr uint8_t CHECK_FAIL_REASON_GIMBAL_ERROR      = 0x03;
+constexpr uint8_t CHECK_FAIL_REASON_UNKNOWN           = 0xFF;
 
 // ── 云台角度模式标志位 ────────────────────────────────────
 constexpr uint8_t GIMBAL_MODE_ABSOLUTE = 0x00;
@@ -323,6 +334,8 @@ private:
     void NotifyTakeoffComplete();
     void NotifyLandComplete();
     void NotifyHoverComplete();
+    void NotifyCheckPassed();
+    void NotifyCheckFailed();
 
     // ── cmd_vel 订阅 + 10Hz 发送定时器 ────────────────────
     void OnCmdVel(const geometry_msgs::Twist::ConstPtr& message);
@@ -367,6 +380,12 @@ private:
                                  indooruav_msgs::GimbalYawFollow::Response& response);
     bool GimbalAngleCallback(indooruav_msgs::GimbalAngle::Request& request,
                              indooruav_msgs::GimbalAngle::Response& response);
+
+    // ── 服务回调：任务/自动化 (0x5x 段) ────────────────────
+    bool VisionCheckCallback(std_srvs::Empty::Request& request,
+                             std_srvs::Empty::Response& response);
+    bool VisionLandingCallback(std_srvs::Empty::Request& request,
+                               std_srvs::Empty::Response& response);
 
     // ── 工具方法 ──────────────────────────────────────────
     bool SendFrame(const uint8_t* buf, uint8_t len);
@@ -440,6 +459,15 @@ private:
     std::string waypoint_clear_service_name_;
     std::string http_upload_image_bytes_service_name_;
 
+    std::string vision_check_service_name_;
+    std::string vision_landing_service_name_;
+    std::string check_passed_service_name_;
+    std::string check_failed_service_name_;
+
+    std::string check_passed_aux_service_name_;
+    std::string check_failed_aux_service_name_;
+    std::string land_complete_aux_service_name_;
+
     std::string cmd_vel_topic_;
     double      vel_send_rate_hz_ = 10.0;
     int         media_camera_mount_position_ = -1;
@@ -464,6 +492,8 @@ private:
     ros::ServiceServer camera_zoom_service_server_;
     ros::ServiceServer gimbal_yaw_follow_service_server_;
     ros::ServiceServer gimbal_angle_service_server_;
+    ros::ServiceServer vision_check_service_server_;
+    ros::ServiceServer vision_landing_service_server_;
 
     // 客户端
     ros::ServiceClient takeoff_complete_client_;
@@ -474,6 +504,14 @@ private:
     ros::ServiceClient waypoint_save_client_;
     ros::ServiceClient waypoint_clear_client_;
     ros::ServiceClient upload_image_bytes_client_;
+
+    ros::ServiceClient check_passed_client_;
+    ros::ServiceClient check_failed_client_;
+
+    // 辅助客户端：并行通知 mission 节点（mission 不在时调用失败不影响主流程）
+    ros::ServiceClient check_passed_aux_client_;
+    ros::ServiceClient check_failed_aux_client_;
+    ros::ServiceClient land_complete_aux_client_;
 
     // 订阅 + 定时器
     ros::Subscriber cmd_vel_subscriber_;

@@ -72,6 +72,22 @@ constexpr char kDefaultWaypointClearService[] =
 constexpr char kDefaultHttpUploadImageBytesService[] =
     "/indooruav_http/upload_image_bytes";
 
+constexpr char kDefaultVisionCheckService[] =
+    "indooruav_controller/controller_hardware/vision_check";
+constexpr char kDefaultVisionLandingService[] =
+    "indooruav_controller/controller_hardware/vision_landing";
+constexpr char kDefaultCheckPassedService[] =
+    "indooruav_core/state_machine_event/check_passed";
+constexpr char kDefaultCheckFailedService[] =
+    "indooruav_core/state_machine_event/check_failed";
+
+constexpr char kDefaultCheckPassedAuxService[] =
+    "indooruav_mission/preflight_check/check_passed";
+constexpr char kDefaultCheckFailedAuxService[] =
+    "indooruav_mission/preflight_check/check_failed";
+constexpr char kDefaultLandCompleteAuxService[] =
+    "indooruav_mission/landing/land_complete";
+
 constexpr char kDefaultCmdVelTopic[] = "indooruav_controller/waypoint_tracker/cmd_vel";
 
 }  // namespace
@@ -191,6 +207,29 @@ void ControllerHardware::LoadParameters() {
                                     http_upload_image_bytes_service_name_,
                                     kDefaultHttpUploadImageBytesService);
 
+    node_handle_.param<std::string>("/indooruav_controller/services/vision_check",
+                                    vision_check_service_name_,
+                                    kDefaultVisionCheckService);
+    node_handle_.param<std::string>("/indooruav_controller/services/vision_landing",
+                                    vision_landing_service_name_,
+                                    kDefaultVisionLandingService);
+    node_handle_.param<std::string>("/indooruav_controller/services/check_passed",
+                                    check_passed_service_name_,
+                                    kDefaultCheckPassedService);
+    node_handle_.param<std::string>("/indooruav_controller/services/check_failed",
+                                    check_failed_service_name_,
+                                    kDefaultCheckFailedService);
+
+    node_handle_.param<std::string>("/indooruav_controller/services/check_passed_aux",
+                                    check_passed_aux_service_name_,
+                                    kDefaultCheckPassedAuxService);
+    node_handle_.param<std::string>("/indooruav_controller/services/check_failed_aux",
+                                    check_failed_aux_service_name_,
+                                    kDefaultCheckFailedAuxService);
+    node_handle_.param<std::string>("/indooruav_controller/services/land_complete_aux",
+                                    land_complete_aux_service_name_,
+                                    kDefaultLandCompleteAuxService);
+
     // 话题 + 频率
     node_handle_.param<std::string>("/indooruav_controller/topics/cmd_vel",
                                     cmd_vel_topic_, kDefaultCmdVelTopic);
@@ -298,6 +337,14 @@ void ControllerHardware::AdvertiseServiceServers() {
         gimbal_angle_service_name_,
         &ControllerHardware::GimbalAngleCallback, this);
 
+    // 任务/自动化 (0x5x 段)
+    vision_check_service_server_ = node_handle_.advertiseService(
+        vision_check_service_name_,
+        &ControllerHardware::VisionCheckCallback, this);
+    vision_landing_service_server_ = node_handle_.advertiseService(
+        vision_landing_service_name_,
+        &ControllerHardware::VisionLandingCallback, this);
+
     ROS_INFO_STREAM("[ControllerHardware] takeoff:    " << takeoff_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] land:       " << land_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] hover:      " << hover_service_name_);
@@ -314,6 +361,8 @@ void ControllerHardware::AdvertiseServiceServers() {
     ROS_INFO_STREAM("[ControllerHardware] cam zoom:   " << camera_zoom_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] gimbal yf:  " << gimbal_yaw_follow_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] gimbal ang: " << gimbal_angle_service_name_);
+    ROS_INFO_STREAM("[ControllerHardware] vision check:  " << vision_check_service_name_);
+    ROS_INFO_STREAM("[ControllerHardware] vision land:  " << vision_landing_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] cmd_vel topic: " << cmd_vel_topic_);
 }
 
@@ -333,6 +382,18 @@ void ControllerHardware::CreateServiceClients() {
         node_handle_.serviceClient<std_srvs::Trigger>(waypoint_clear_service_name_);
     upload_image_bytes_client_ =
         node_handle_.serviceClient<indooruav_msgs::UploadImageBytes>(http_upload_image_bytes_service_name_);
+
+    check_passed_client_ =
+        node_handle_.serviceClient<std_srvs::Empty>(check_passed_service_name_);
+    check_failed_client_ =
+        node_handle_.serviceClient<std_srvs::Empty>(check_failed_service_name_);
+
+    check_passed_aux_client_ =
+        node_handle_.serviceClient<std_srvs::Empty>(check_passed_aux_service_name_);
+    check_failed_aux_client_ =
+        node_handle_.serviceClient<std_srvs::Empty>(check_failed_aux_service_name_);
+    land_complete_aux_client_ =
+        node_handle_.serviceClient<std_srvs::Empty>(land_complete_aux_service_name_);
 
     ROS_INFO_STREAM("[ControllerHardware] takeoff_complete: " << takeoff_complete_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] land_complete:    " << land_complete_service_name_);
@@ -456,6 +517,14 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
         ack_frame[4] = status;
         ack_frame[5] = ack_frame[0] ^ ack_frame[1] ^ ack_frame[2] ^ ack_frame[3] ^ ack_frame[4];
         SendFrame(ack_frame, sizeof(ack_frame));
+    } else if (frame.cmd == drone_comm::CMD_ACK_CHECK_PASSED) {
+        ROS_INFO("[ControllerHardware] NOTIFY: CHECK PASSED");
+        NotifyCheckPassed();
+    } else if (frame.cmd == drone_comm::CMD_ACK_CHECK_FAILED) {
+        const uint8_t reason = (frame.len >= 1) ? frame.payload[0]
+                                                : drone_comm::CHECK_FAIL_REASON_UNKNOWN;
+        ROS_WARN("[ControllerHardware] NOTIFY: CHECK FAILED (reason=0x%02X)", reason);
+        NotifyCheckFailed();
     } else {
         ROS_INFO("[ControllerHardware] RX unknown cmd=0x%02X len=%u",
                  frame.cmd, frame.len);
@@ -476,12 +545,36 @@ void ControllerHardware::NotifyLandComplete() {
     CallEmptyService(land_complete_client_,
                      land_complete_service_name_,
                      "land_complete");
+    // 并行通知 mission 节点
+    CallEmptyService(land_complete_aux_client_,
+                     land_complete_aux_service_name_,
+                     "land_complete_aux");
 }
 
 void ControllerHardware::NotifyHoverComplete() {
     CallEmptyService(hover_complete_client_,
                      hover_complete_service_name_,
                      "hover_complete");
+}
+
+void ControllerHardware::NotifyCheckPassed() {
+    CallEmptyService(check_passed_client_,
+                     check_passed_service_name_,
+                     "check_passed");
+    // 并行通知 mission 节点（mission 不在时静默失败）
+    CallEmptyService(check_passed_aux_client_,
+                     check_passed_aux_service_name_,
+                     "check_passed_aux");
+}
+
+void ControllerHardware::NotifyCheckFailed() {
+    CallEmptyService(check_failed_client_,
+                     check_failed_service_name_,
+                     "check_failed");
+    // 并行通知 mission 节点
+    CallEmptyService(check_failed_aux_client_,
+                     check_failed_aux_service_name_,
+                     "check_failed_aux");
 }
 
 bool ControllerHardware::CallEmptyService(ros::ServiceClient& client,
@@ -953,6 +1046,46 @@ bool ControllerHardware::GimbalAngleCallback(
                  payload.pitch, payload.roll, payload.yaw, payload.duration);
     } else {
         ROS_WARN("[ControllerHardware] TX GIMBAL_ANGLE FAILED");
+    }
+    return true;
+}
+
+// =============================================================================
+// 服务回调：任务/自动化 (0x5x 段)
+// =============================================================================
+
+bool ControllerHardware::VisionCheckCallback(
+    std_srvs::Empty::Request& /*request*/,
+    std_srvs::Empty::Response& /*response*/) {
+    uint8_t buf[8];
+    const uint8_t len = drone_comm::encode_simple(
+        drone_comm::CMD_CHECK_BEFORE_TAKEOFF, buf, sizeof(buf));
+    if (len == 0) {
+        ROS_ERROR("[ControllerHardware] encode_simple(check_before_takeoff) failed");
+        return true;
+    }
+    if (SendFrame(buf, len)) {
+        ROS_INFO("[ControllerHardware] TX check_before_takeoff");
+    } else {
+        ROS_WARN("[ControllerHardware] TX check_before_takeoff FAILED");
+    }
+    return true;
+}
+
+bool ControllerHardware::VisionLandingCallback(
+    std_srvs::Empty::Request& /*request*/,
+    std_srvs::Empty::Response& /*response*/) {
+    uint8_t buf[8];
+    const uint8_t len = drone_comm::encode_simple(
+        drone_comm::CMD_VISION_LANDING, buf, sizeof(buf));
+    if (len == 0) {
+        ROS_ERROR("[ControllerHardware] encode_simple(vision_landing) failed");
+        return true;
+    }
+    if (SendFrame(buf, len)) {
+        ROS_INFO("[ControllerHardware] TX vision_landing");
+    } else {
+        ROS_WARN("[ControllerHardware] TX vision_landing FAILED");
     }
     return true;
 }
