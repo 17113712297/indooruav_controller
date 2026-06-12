@@ -45,7 +45,7 @@ indooruav_controller:
 
   parameters:
     vel_send_rate_hz: 10.0
-    media_camera_mount_position: 2
+    media_camera_mount_position: -1
     media_time_tolerance_sec: 5.0
     media_file_wait_timeout_sec: 60.0
 
