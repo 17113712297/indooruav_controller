@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="config_file"
+       default="$(find indooruav_controller)/config/config.yaml"/>
+
+  <rosparam command="load" file="$(arg config_file)"/>
+
+  <node pkg="indooruav_controller"
+        type="psdk_state_adapter_node"
+        name="psdk_state_adapter"
+        output="screen"
+        required="true"/>
+</launch>
