@@ -37,6 +37,7 @@
 
 #include <ros/ros.h>
 #include <geometry_msgs/Twist.h>
+#include <std_msgs/String.h>
 #include <std_srvs/Empty.h>
 #include <std_srvs/Trigger.h>
 
@@ -51,6 +52,7 @@
 #include <indooruav_msgs/GimbalYawFollow.h>
 #include <indooruav_msgs/TransferMissionMedia.h>
 #include <indooruav_msgs/UploadImageBytes.h>
+#include <indooruav_http/SendErrorData.h>
 
 // =============================================================================
 // 协议层 (与 MSDK Kotlin 端共用同一套编解码规则)
@@ -325,6 +327,9 @@ private:
     void AdvertiseServiceServers();
     void CreateServiceClients();
     void CreateSubscribersAndTimers();
+    void InitializeFcSubscription();
+    void ShutdownFcSubscription();
+    void PublishHttpDeviceState();
 
     // ── PSDK 接收回调：C 风格静态分发 + 实例方法 ──────────
     static T_DjiReturnCode StaticOnRecvFromMsdk(const uint8_t* data, uint16_t len);
@@ -340,6 +345,7 @@ private:
     // ── cmd_vel 订阅 + 10Hz 发送定时器 ────────────────────
     void OnCmdVel(const geometry_msgs::Twist::ConstPtr& message);
     void OnVelSendTimer(const ros::TimerEvent& event);
+    void TelemetrySyncTimerCallback(const ros::TimerEvent& event);
 
     // ── 服务回调：飞控 ────────────────────────────────────
     bool TakeoffCallback(std_srvs::Empty::Request& request,
@@ -392,6 +398,7 @@ private:
     bool CallEmptyService(ros::ServiceClient& client,
                           const std::string& service_name,
                           const char* service_label);
+    bool ReportHttpError(int error_type, const std::string& error_info);
     bool InitializeCameraManager();
     bool EnsureCameraManagerReady();
     bool IsSupportedMediaType(E_DjiCameraMediaFileType media_type) const;
@@ -458,6 +465,7 @@ private:
     std::string waypoint_save_service_name_;
     std::string waypoint_clear_service_name_;
     std::string http_upload_image_bytes_service_name_;
+    std::string http_send_error_data_service_name_;
 
     std::string vision_check_service_name_;
     std::string vision_landing_service_name_;
@@ -469,6 +477,7 @@ private:
     std::string land_complete_aux_service_name_;
 
     std::string cmd_vel_topic_;
+    std::string http_device_state_topic_;
     double      vel_send_rate_hz_ = 10.0;
     int         media_camera_mount_position_ = -1;
     double      media_time_tolerance_sec_ = 5.0;
@@ -504,6 +513,7 @@ private:
     ros::ServiceClient waypoint_save_client_;
     ros::ServiceClient waypoint_clear_client_;
     ros::ServiceClient upload_image_bytes_client_;
+    ros::ServiceClient send_error_data_client_;
 
     ros::ServiceClient check_passed_client_;
     ros::ServiceClient check_failed_client_;
@@ -515,7 +525,9 @@ private:
 
     // 订阅 + 定时器
     ros::Subscriber cmd_vel_subscriber_;
+    ros::Publisher http_device_state_publisher_;
     ros::Timer      vel_send_timer_;
+    ros::Timer      telemetry_sync_timer_;
 
     // ── 共享状态 ──────────────────────────────────────────
     // vel_mutex_ 守护 latest_vel_ / vel_updated_ / vel_forwarding_enabled_
@@ -527,6 +539,17 @@ private:
 
     // tx_mutex_ 串行化所有 PSDK 低速通道的 SendData 调用
     std::mutex tx_mutex_;
+    std::mutex telemetry_mutex_;
+    bool fc_subscription_initialized_ = false;
+    bool fc_topics_subscribed_ = false;
+    bool fc_telemetry_received_ = false;
+    bool rc_logic_connected_ = false;
+    bool rc_ground_connected_ = false;
+    bool rc_sky_connected_ = false;
+    bool battery_info_valid_ = false;
+    double battery_temperature_c_ = 0.0;
+    double battery_soc_percent_ = 0.0;
+    double battery_voltage_v_ = 0.0;
 
     // ACK 计数 (仅日志用)
     std::atomic<uint32_t> ack_count_{0};

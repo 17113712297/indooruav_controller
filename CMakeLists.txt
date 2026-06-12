@@ -9,18 +9,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
+  indooruav_http
   indooruav_msgs
-  mavros_msgs
   nav_msgs
   roscpp
   std_msgs
   std_srvs
   tf
 )
+find_package(mavros_msgs QUIET)
 
 catkin_package(
   INCLUDE_DIRS include psdk_lib/include
-  CATKIN_DEPENDS geometry_msgs indooruav_msgs mavros_msgs nav_msgs roscpp std_msgs std_srvs tf
+  CATKIN_DEPENDS geometry_msgs indooruav_http indooruav_msgs nav_msgs roscpp std_msgs std_srvs tf
 )
 
 # ── Payload SDK 静态库 ─────────────────────────────────────
@@ -93,33 +94,43 @@ target_compile_options(controller_hardware_node
 )
 
 # ── 仿真节点 ─────────────────────────────────────────────────
-add_executable(controller_simulate_node
-  node/controller_simulate_node.cpp
-  src/indooruav_controller/controller_simulate.cpp
-)
-add_dependencies(controller_simulate_node
-  ${${PROJECT_NAME}_EXPORTED_TARGETS}
-  ${catkin_EXPORTED_TARGETS}
-)
-target_link_libraries(controller_simulate_node
-  PRIVATE
-    ${catkin_LIBRARIES}
-)
-target_compile_options(controller_simulate_node
-  PRIVATE
-    -Wall
-    -Wextra
-)
+if(mavros_msgs_FOUND)
+  add_executable(controller_simulate_node
+    node/controller_simulate_node.cpp
+    src/indooruav_controller/controller_simulate.cpp
+  )
+  add_dependencies(controller_simulate_node
+    ${${PROJECT_NAME}_EXPORTED_TARGETS}
+    ${catkin_EXPORTED_TARGETS}
+  )
+  target_link_libraries(controller_simulate_node
+    PRIVATE
+      ${catkin_LIBRARIES}
+  )
+  target_compile_options(controller_simulate_node
+    PRIVATE
+      -Wall
+      -Wextra
+  )
+else()
+  message(WARNING "mavros_msgs not found, skipping controller_simulate_node build")
+endif()
 
 # ── 安装 ───────────────────────────────────────────────────
 install(TARGETS
   ${PROJECT_NAME}_platform
   controller_hardware_node
-  controller_simulate_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
+
+if(mavros_msgs_FOUND)
+  install(TARGETS
+    controller_simulate_node
+    RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+  )
+endif()
 
 install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}

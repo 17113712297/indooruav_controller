@@ -9,8 +9,11 @@
 #include <cmath>
 #include <ctime>
 #include <iomanip>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
+
+#include <dji_fc_subscription.h>
 
 namespace indooruav_controller {
 
@@ -71,6 +74,8 @@ constexpr char kDefaultWaypointClearService[] =
     "indooruav_controller/waypoint_recorder/clear";
 constexpr char kDefaultHttpUploadImageBytesService[] =
     "/indooruav_http/upload_image_bytes";
+constexpr char kDefaultHttpSendErrorDataService[] =
+    "/indooruav_http/send_error_data";
 
 constexpr char kDefaultVisionCheckService[] =
     "indooruav_controller/controller_hardware/vision_check";
@@ -89,6 +94,7 @@ constexpr char kDefaultLandCompleteAuxService[] =
     "indooruav_mission/landing/land_complete";
 
 constexpr char kDefaultCmdVelTopic[] = "indooruav_controller/waypoint_tracker/cmd_vel";
+constexpr char kDefaultHttpDeviceStateTopic[] = "/indooruav_controller/http/device_state";
 
 }  // namespace
 
@@ -113,6 +119,7 @@ ControllerHardware::ControllerHardware(ros::NodeHandle& node_handle)
     // 由 main() 保证调用顺序。
     InitializePsdkChannel();
     InitializeCameraManager();
+    InitializeFcSubscription();
 
     AdvertiseServiceServers();
     CreateServiceClients();
@@ -122,6 +129,7 @@ ControllerHardware::ControllerHardware(ros::NodeHandle& node_handle)
 }
 
 ControllerHardware::~ControllerHardware() {
+    ShutdownFcSubscription();
     // 注意：PSDK 没有公开"反注册接收回调"接口，析构后若 PSDK 线程仍调用
     // StaticOnRecvFromMsdk，instance_ == nullptr 时会安全返回 SUCCESS。
     instance_ = nullptr;
@@ -206,6 +214,9 @@ void ControllerHardware::LoadParameters() {
     node_handle_.param<std::string>("/indooruav_controller/services/http_upload_image_bytes",
                                     http_upload_image_bytes_service_name_,
                                     kDefaultHttpUploadImageBytesService);
+    node_handle_.param<std::string>("/indooruav_controller/services/http_send_error_data",
+                                    http_send_error_data_service_name_,
+                                    kDefaultHttpSendErrorDataService);
 
     node_handle_.param<std::string>("/indooruav_controller/services/vision_check",
                                     vision_check_service_name_,
@@ -233,6 +244,8 @@ void ControllerHardware::LoadParameters() {
     // 话题 + 频率
     node_handle_.param<std::string>("/indooruav_controller/topics/cmd_vel",
                                     cmd_vel_topic_, kDefaultCmdVelTopic);
+    node_handle_.param<std::string>("/indooruav_controller/topics/http_device_state",
+                                    http_device_state_topic_, kDefaultHttpDeviceStateTopic);
     node_handle_.param<double>("/indooruav_controller/parameters/vel_send_rate_hz",
                                vel_send_rate_hz_, 10.0);
     node_handle_.param<int>("/indooruav_controller/parameters/media_camera_mount_position",
@@ -382,6 +395,8 @@ void ControllerHardware::CreateServiceClients() {
         node_handle_.serviceClient<std_srvs::Trigger>(waypoint_clear_service_name_);
     upload_image_bytes_client_ =
         node_handle_.serviceClient<indooruav_msgs::UploadImageBytes>(http_upload_image_bytes_service_name_);
+    send_error_data_client_ =
+        node_handle_.serviceClient<indooruav_http::SendErrorData>(http_send_error_data_service_name_);
 
     check_passed_client_ =
         node_handle_.serviceClient<std_srvs::Empty>(check_passed_service_name_);
@@ -402,15 +417,188 @@ void ControllerHardware::CreateServiceClients() {
     ROS_INFO_STREAM("[ControllerHardware] wp save:   " << waypoint_save_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] wp clear:  " << waypoint_clear_service_name_);
     ROS_INFO_STREAM("[ControllerHardware] http upload image bytes: " << http_upload_image_bytes_service_name_);
+    ROS_INFO_STREAM("[ControllerHardware] http send error data: " << http_send_error_data_service_name_);
 }
 
 void ControllerHardware::CreateSubscribersAndTimers() {
+    http_device_state_publisher_ =
+        node_handle_.advertise<std_msgs::String>(http_device_state_topic_, 10, true);
     cmd_vel_subscriber_ = node_handle_.subscribe<geometry_msgs::Twist>(
         cmd_vel_topic_, 1, &ControllerHardware::OnCmdVel, this);
 
     vel_send_timer_ = node_handle_.createTimer(
         ros::Duration(1.0 / vel_send_rate_hz_),
         &ControllerHardware::OnVelSendTimer, this);
+    telemetry_sync_timer_ = node_handle_.createTimer(
+        ros::Duration(1.0),
+        &ControllerHardware::TelemetrySyncTimerCallback, this);
+
+    PublishHttpDeviceState();
+}
+
+void ControllerHardware::InitializeFcSubscription() {
+    const T_DjiReturnCode init_ret = DjiFcSubscription_Init();
+    if (init_ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        ROS_WARN("[ControllerHardware] DjiFcSubscription_Init failed: 0x%08llX",
+                 static_cast<unsigned long long>(init_ret));
+        return;
+    }
+    fc_subscription_initialized_ = true;
+
+    const struct {
+        E_DjiFcSubscriptionTopic topic;
+        E_DjiDataSubscriptionTopicFreq frequency;
+        const char* name;
+    } topics[] = {
+        {DJI_FC_SUBSCRIPTION_TOPIC_STATUS_FLIGHT, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ, "status_flight"},
+        {DJI_FC_SUBSCRIPTION_TOPIC_CONTROL_DEVICE, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ, "control_device"},
+        {DJI_FC_SUBSCRIPTION_TOPIC_RC_WITH_FLAG_DATA, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ, "rc_with_flag_data"},
+        {DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_INFO, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ, "battery_info"},
+        {DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_SINGLE_INFO_INDEX1, DJI_DATA_SUBSCRIPTION_TOPIC_1_HZ, "battery_single_info_1"}
+    };
+
+    bool all_ok = true;
+    for (const auto& item : topics) {
+        const T_DjiReturnCode ret =
+            DjiFcSubscription_SubscribeTopic(item.topic, item.frequency, nullptr);
+        if (ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+            ROS_WARN("[ControllerHardware] Failed to subscribe FC topic %s: 0x%08llX",
+                     item.name,
+                     static_cast<unsigned long long>(ret));
+            all_ok = false;
+            continue;
+        }
+        ROS_INFO("[ControllerHardware] Subscribed FC topic: %s", item.name);
+    }
+
+    fc_topics_subscribed_ = all_ok;
+}
+
+void ControllerHardware::ShutdownFcSubscription() {
+    if (!fc_subscription_initialized_) {
+        return;
+    }
+
+    const E_DjiFcSubscriptionTopic topics[] = {
+        DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_SINGLE_INFO_INDEX1,
+        DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_INFO,
+        DJI_FC_SUBSCRIPTION_TOPIC_RC_WITH_FLAG_DATA,
+        DJI_FC_SUBSCRIPTION_TOPIC_CONTROL_DEVICE,
+        DJI_FC_SUBSCRIPTION_TOPIC_STATUS_FLIGHT
+    };
+    for (const E_DjiFcSubscriptionTopic topic : topics) {
+        DjiFcSubscription_UnSubscribeTopic(topic);
+    }
+    DjiFcSubscription_DeInit();
+    fc_subscription_initialized_ = false;
+    fc_topics_subscribed_ = false;
+}
+
+void ControllerHardware::PublishHttpDeviceState() {
+    if (!http_device_state_publisher_) {
+        return;
+    }
+
+    int uav_state = 0;
+    int control_state = 0;
+    double battery_temp = 0.0;
+    double battery_soc = 0.0;
+    double battery_volt = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(telemetry_mutex_);
+        uav_state = fc_telemetry_received_ ? 1 : 0;
+        control_state = rc_logic_connected_ ? 1 : 0;
+        battery_temp = battery_temperature_c_;
+        battery_soc = battery_soc_percent_;
+        battery_volt = battery_voltage_v_;
+    }
+
+    nlohmann::json payload = {
+        {"uavState", uav_state},
+        {"controlState", control_state},
+        {"controlRssi", 0.0},
+        {"batteryTemp", battery_temp},
+        {"batterySoc", battery_soc},
+        {"batteryRssi", 0.0},
+        {"batteryVolt", battery_volt}
+    };
+
+    std_msgs::String msg;
+    msg.data = payload.dump();
+    http_device_state_publisher_.publish(msg);
+}
+void ControllerHardware::TelemetrySyncTimerCallback(const ros::TimerEvent& /*event*/) {
+    if (!fc_subscription_initialized_ || !fc_topics_subscribed_) {
+        return;
+    }
+
+    T_DjiDataTimestamp timestamp{};
+    T_DjiFcSubscriptionFlightStatus flight_status = 0;
+    T_DjiFcSubscriptionRCWithFlagData rc_data{};
+    T_DjiFcSubscriptionWholeBatteryInfo battery_info{};
+    T_DjiFcSubscriptionSingleBatteryInfo battery_single_info{};
+
+    bool should_publish = false;
+    {
+        std::lock_guard<std::mutex> lock(telemetry_mutex_);
+
+        if (DjiFcSubscription_GetLatestValueOfTopic(
+                DJI_FC_SUBSCRIPTION_TOPIC_STATUS_FLIGHT,
+                reinterpret_cast<uint8_t*>(&flight_status),
+                sizeof(flight_status),
+                &timestamp) == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+            fc_telemetry_received_ = true;
+            rc_sky_connected_ =
+                flight_status == DJI_FC_SUBSCRIPTION_FLIGHT_STATUS_ON_GROUND ||
+                flight_status == DJI_FC_SUBSCRIPTION_FLIGHT_STATUS_IN_AIR;
+            should_publish = true;
+        }
+
+        if (DjiFcSubscription_GetLatestValueOfTopic(
+                DJI_FC_SUBSCRIPTION_TOPIC_RC_WITH_FLAG_DATA,
+                reinterpret_cast<uint8_t*>(&rc_data),
+                sizeof(rc_data),
+                &timestamp) == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+            fc_telemetry_received_ = true;
+            rc_logic_connected_ = rc_data.flag.logicConnected != 0;
+            rc_ground_connected_ = rc_data.flag.groundConnected != 0;
+            rc_sky_connected_ = rc_data.flag.skyConnected != 0;
+            should_publish = true;
+        }
+
+        if (DjiFcSubscription_GetLatestValueOfTopic(
+                DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_INFO,
+                reinterpret_cast<uint8_t*>(&battery_info),
+                sizeof(battery_info),
+                &timestamp) == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+            fc_telemetry_received_ = true;
+            battery_soc_percent_ = static_cast<double>(battery_info.percentage);
+            battery_voltage_v_ = static_cast<double>(battery_info.voltage) / 1000.0;
+            battery_info_valid_ = true;
+            should_publish = true;
+        }
+
+        if (DjiFcSubscription_GetLatestValueOfTopic(
+                DJI_FC_SUBSCRIPTION_TOPIC_BATTERY_SINGLE_INFO_INDEX1,
+                reinterpret_cast<uint8_t*>(&battery_single_info),
+                sizeof(battery_single_info),
+                &timestamp) == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+            fc_telemetry_received_ = true;
+            battery_temperature_c_ =
+                static_cast<double>(battery_single_info.batteryTemperature) / 10.0;
+            if (!battery_info_valid_) {
+                battery_soc_percent_ =
+                    static_cast<double>(battery_single_info.batteryCapacityPercent);
+                battery_voltage_v_ =
+                    static_cast<double>(battery_single_info.currentVoltage) / 1000.0;
+            }
+            should_publish = true;
+        }
+    }
+
+    if (should_publish) {
+        PublishHttpDeviceState();
+    }
 }
 
 // =============================================================================
@@ -524,6 +712,7 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
         const uint8_t reason = (frame.len >= 1) ? frame.payload[0]
                                                 : drone_comm::CHECK_FAIL_REASON_UNKNOWN;
         ROS_WARN("[ControllerHardware] NOTIFY: CHECK FAILED (reason=0x%02X)", reason);
+        ReportHttpError(3, "preflight_check_failed_reason=" + std::to_string(reason));
         NotifyCheckFailed();
     } else {
         ROS_INFO("[ControllerHardware] RX unknown cmd=0x%02X len=%u",
@@ -588,6 +777,30 @@ bool ControllerHardware::CallEmptyService(ros::ServiceClient& client,
     }
     ROS_INFO_STREAM("[ControllerHardware] Called "
                     << service_label << " service: " << service_name);
+    return true;
+}
+
+bool ControllerHardware::ReportHttpError(int error_type, const std::string& error_info) {
+    indooruav_http::SendErrorData service;
+    service.request.error_type = error_type;
+    service.request.error_info = error_info;
+    if (!send_error_data_client_.call(service)) {
+        ROS_WARN_STREAM("[ControllerHardware] Failed to call http error reporting service: "
+                        << http_send_error_data_service_name_);
+        return false;
+    }
+
+    if (service.response.result_code != 1) {
+        ROS_WARN("[ControllerHardware] http error reporting returned resultCode=%d, errorType=%d, errorInfo=%s",
+                 service.response.result_code,
+                 error_type,
+                 error_info.c_str());
+        return false;
+    }
+
+    ROS_INFO("[ControllerHardware] Reported error to http client: errorType=%d errorInfo=%s",
+             error_type,
+             error_info.c_str());
     return true;
 }
 
@@ -848,6 +1061,7 @@ bool ControllerHardware::UploadMissionPhotosFromSdCallback(
     } running_guard{sd_transfer_running_};
 
     if (!EnsureCameraManagerReady()) {
+        ReportHttpError(4, "camera_manager_init_failed");
         response.result_code = 2;
         return true;
     }
@@ -860,6 +1074,7 @@ bool ControllerHardware::UploadMissionPhotosFromSdCallback(
     if (reg_ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         ROS_WARN("[ControllerHardware] Failed to register media download callback: 0x%08llX",
                  static_cast<unsigned long long>(reg_ret));
+        ReportHttpError(4, "register_media_download_callback_failed");
         response.result_code = 2;
         return true;
     }
@@ -868,6 +1083,7 @@ bool ControllerHardware::UploadMissionPhotosFromSdCallback(
     if (rights_ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         ROS_WARN("[ControllerHardware] Failed to obtain downloader rights: 0x%08llX",
                  static_cast<unsigned long long>(rights_ret));
+        ReportHttpError(4, "obtain_downloader_rights_failed");
         response.result_code = 2;
         return true;
     }
@@ -888,6 +1104,7 @@ bool ControllerHardware::UploadMissionPhotosFromSdCallback(
     if (list_ret != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         ROS_WARN("[ControllerHardware] Failed to download camera file list: 0x%08llX",
                  static_cast<unsigned long long>(list_ret));
+        ReportHttpError(4, "download_camera_file_list_failed");
         response.result_code = 2;
         return true;
     }
