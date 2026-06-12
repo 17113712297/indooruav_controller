@@ -112,6 +112,26 @@ target_compile_options(psdk_state_adapter_node
     -Wextra
 )
 
+add_executable(controller_hardware_with_state_node
+  node/controller_hardware_with_state_node.cpp
+  src/indooruav_controller/controller_hardware.cpp
+  src/indooruav_controller/psdk_state_adapter.cpp
+)
+add_dependencies(controller_hardware_with_state_node
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+target_link_libraries(controller_hardware_with_state_node
+  PRIVATE
+    ${PROJECT_NAME}_platform
+    ${catkin_LIBRARIES}
+)
+target_compile_options(controller_hardware_with_state_node
+  PRIVATE
+    -Wall
+    -Wextra
+)
+
 # ── 仿真节点 ─────────────────────────────────────────────────
 if(mavros_msgs_FOUND)
   add_executable(controller_simulate_node
@@ -140,6 +160,7 @@ install(TARGETS
   ${PROJECT_NAME}_platform
   controller_hardware_node
   psdk_state_adapter_node
+  controller_hardware_with_state_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

@@ -1,0 +1,8 @@
+controller_hardware_node
+只跑桥接
+psdk_state_adapter_node
+只跑 PSDK 状态读取
+
+启动方式：
+roslaunch indooruav_controller bringup_controller_hardware_with_state.
+防止抢psdk
