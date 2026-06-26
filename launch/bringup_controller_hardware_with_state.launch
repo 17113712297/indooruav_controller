@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="config_file"
+       default="$(find indooruav_controller)/config/config.yaml"/>
+
+  <rosparam command="load" file="$(arg config_file)"/>
+
+  <node pkg="indooruav_controller"
+        type="controller_hardware_with_state_node"
+        name="controller_hardware_with_state"
+        output="screen"
+        required="true"/>
+</launch>

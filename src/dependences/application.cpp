@@ -66,7 +66,7 @@ Application::Application(int argc, char **argv)
     Application::DjiUser_SetupEnvironment();
     Application::DjiUser_ApplicationStart();
 
-    Osal_TaskSleepMs(3000);
+    Osal_TaskSleepMs(8000);
 }
 
 Application::~Application()
