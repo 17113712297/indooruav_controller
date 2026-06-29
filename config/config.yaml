@@ -13,7 +13,7 @@ indooruav_controller:
     camera_mode_photo: "indooruav_controller/controller_hardware/camera_mode_photo"
     camera_mode_video: "indooruav_controller/controller_hardware/camera_mode_video"
     camera_shoot:      "indooruav_controller/controller_hardware/camera_photo_shoot"
-    upload_mission_photos_from_sd: "indooruav_controller/controller_hardware/upload_mission_photos_from_sd"
+    upload_mission_photos_from_sd: "indooruav_controller/psdk_state_adapter/upload_mission_photos_from_sd"
     camera_video_config: "indooruav_controller/controller_hardware/camera_video_config"
     camera_zoom:         "indooruav_controller/controller_hardware/camera_zoom"
 
@@ -42,12 +42,14 @@ indooruav_controller:
 
   topics:
     cmd_vel: "indooruav_controller/waypoint_tracker/cmd_vel"
+    http_device_state: "/indooruav_controller/http/device_state"
 
   parameters:
     vel_send_rate_hz: 10.0
     media_camera_mount_position: -1
     media_time_tolerance_sec: 5.0
     media_file_wait_timeout_sec: 60.0
+    enable_media_upload: false
 
   # ── 仿真模式（GPS 定位版）────────────────────────────────
   simulate:
