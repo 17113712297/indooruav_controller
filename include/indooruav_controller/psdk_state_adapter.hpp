@@ -49,7 +49,7 @@ private:
     bool ReportHttpError(int error_type, const std::string& error_info);
     bool EnsureCameraManagerReady();
     bool IsSupportedMediaType(E_DjiCameraMediaFileType media_type) const;
-    bool UploadMediaFile(const T_DjiCameraManagerFileListInfo& file_info,gg
+    bool UploadMediaFile(const T_DjiCameraManagerFileListInfo& file_info,
                          const std::string& airline_key,
                          const std::string& detect_time_cur);
     bool UploadDownloadedBytes(const T_DjiCameraManagerFileListInfo& file_info,
