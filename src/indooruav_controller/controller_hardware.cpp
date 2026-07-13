@@ -468,7 +468,7 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
 
     // ── 模式指令（建图/采点等 0x60 段）──────────────────────────
     if (frame.cmd >= drone_comm::CMD_MAPPING_SET_NAME &&
-        frame.cmd <= drone_comm::CMD_LIST_WAYPOINTS) {
+        frame.cmd <= drone_comm::CMD_CRUISE_SET_SERVER) {
         indooruav_msgs::ModeCommand srv;
         switch (frame.cmd) {
             case drone_comm::CMD_MAPPING_SET_NAME:
@@ -523,6 +523,18 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
                 break;
             case drone_comm::CMD_LIST_WAYPOINTS:
                 srv.request.command = "list_waypoints";
+                break;
+            case drone_comm::CMD_CRUISE_SELECT_WP:
+                srv.request.command = "cruise_select_wp";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
+                break;
+            case drone_comm::CMD_CRUISE_SET_SERVER:
+                srv.request.command = "cruise_set_server";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
+                break;
+            case drone_comm::CMD_CRUISE_SELECT_WP:
+                srv.request.command = "cruise_select_wp";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
                 break;
         }
 

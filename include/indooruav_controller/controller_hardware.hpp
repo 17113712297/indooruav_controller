@@ -70,6 +70,8 @@ constexpr uint8_t CMD_CRUISE_START   = 0x6D;  // Android→ROS: 触发 HTTP 起�
 
 // ★ 通用查询 (0x6E-0x6F)
 constexpr uint8_t CMD_LIST_WAYPOINTS = 0x6E;  // Android→ROS: 获取航线文件列表
+constexpr uint8_t CMD_CRUISE_SELECT_WP = 0x6F; // Android→ROS: 选择航线（调用 airlineInfo API）
+constexpr uint8_t CMD_CRUISE_SET_SERVER = 0x70; // Android→ROS: 设置巡航服务器地址
 
 // ★ 响应指令 (0x90-0x9F)
 constexpr uint8_t CMD_FILE_LIST_RESPONSE   = 0x90; // ROS→Android: 地图文件列表响应
