@@ -532,6 +532,10 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
                 srv.request.command = "cruise_set_server";
                 srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
                 break;
+            case drone_comm::CMD_CRUISE_SET_GIMBAL_PITCH:
+                srv.request.command = "cruise_set_gimbal_pitch";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
+                break;
             case drone_comm::CMD_CRUISE_SELECT_WP:
                 srv.request.command = "cruise_select_wp";
                 srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
