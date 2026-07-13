@@ -23,6 +23,7 @@
 #include <indooruav_msgs/CameraZoom.h>
 #include <indooruav_msgs/GimbalAngle.h>
 #include <indooruav_msgs/GimbalYawFollow.h>
+#include <indooruav_msgs/ModeCommand.h>
 
 namespace drone_comm {
 
@@ -46,6 +47,33 @@ constexpr uint8_t CMD_SAVE_WAYPOINTS    = 0x42;
 constexpr uint8_t CMD_CLEAR_WAYPOINTS   = 0x43;
 constexpr uint8_t CMD_CHECK_BEFORE_TAKEOFF = 0x50;
 constexpr uint8_t CMD_VISION_LANDING       = 0x51;
+
+// ★ 建图模式指令 (0x60-0x64)
+constexpr uint8_t CMD_MAPPING_SET_NAME = 0x60;  // Android→ROS: 设置地图名称
+constexpr uint8_t CMD_MAPPING_START    = 0x61;  // Android→ROS: 启动雷达+建图
+constexpr uint8_t CMD_MAPPING_SAVE_MAP = 0x62;  // Android→ROS: 保存地图
+constexpr uint8_t CMD_MAPPING_STOP     = 0x63;  // Android→ROS: 停止雷达+建图
+constexpr uint8_t CMD_LIST_MAPS        = 0x64;  // Android→ROS: 获取地图文件列表
+
+// ★ 采点模式指令 (0x65-0x6A)
+constexpr uint8_t CMD_COLLECT_SET_MAP     = 0x65;  // Android→ROS: 设置定位地图
+constexpr uint8_t CMD_COLLECT_SET_WP_NAME = 0x66;  // Android→ROS: 设置航点文件名
+constexpr uint8_t CMD_COLLECT_START       = 0x67;  // Android→ROS: 启动雷达+定位+记录器
+constexpr uint8_t CMD_COLLECT_GEN_2D      = 0x68;  // Android→ROS: 生成2D地图
+constexpr uint8_t CMD_COLLECT_GEN_PIXEL   = 0x69;  // Android→ROS: 生成像素坐标
+constexpr uint8_t CMD_COLLECT_STOP        = 0x6A;  // Android→ROS: 停止雷达+定位+记录器
+
+// ★ 巡航模式指令 (0x6B-0x6D)
+constexpr uint8_t CMD_CRUISE_SET_MAP = 0x6B;  // Android→ROS: 设置定位地图
+constexpr uint8_t CMD_CRUISE_SET_WP  = 0x6C;  // Android→ROS: 设置航线文件
+constexpr uint8_t CMD_CRUISE_START   = 0x6D;  // Android→ROS: 触发 HTTP 起飞指令
+
+// ★ 通用查询 (0x6E-0x6F)
+constexpr uint8_t CMD_LIST_WAYPOINTS = 0x6E;  // Android→ROS: 获取航线文件列表
+
+// ★ 响应指令 (0x90-0x9F)
+constexpr uint8_t CMD_FILE_LIST_RESPONSE   = 0x90; // ROS→Android: 地图文件列表响应
+constexpr uint8_t CMD_FILE_LIST_RESPONSE_WP = 0x91; // ROS→Android: 航线文件列表响应
 constexpr uint8_t CMD_ACK                    = 0x80;
 constexpr uint8_t CMD_ACK_TAKEOFF_COMPLETE   = 0x81;
 constexpr uint8_t CMD_ACK_LAND_COMPLETE      = 0x82;
@@ -373,6 +401,10 @@ private:
     std::string check_failed_aux_service_name_;
     std::string land_complete_aux_service_name_;
 
+    // ★ 建图模式
+    std::string mode_command_service_name_;
+    bool SendModeCommand(const std::string& command, const std::string& payload);
+
     std::string cmd_vel_topic_;
     double      vel_send_rate_hz_ = 10.0;
 
@@ -405,6 +437,7 @@ private:
     ros::ServiceClient check_passed_aux_client_;
     ros::ServiceClient check_failed_aux_client_;
     ros::ServiceClient land_complete_aux_client_;
+    ros::ServiceClient mode_command_client_;
 
     ros::Subscriber cmd_vel_subscriber_;
     ros::Timer      vel_send_timer_;

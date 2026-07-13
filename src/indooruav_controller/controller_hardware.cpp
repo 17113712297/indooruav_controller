@@ -77,6 +77,9 @@ constexpr char kDefaultCheckFailedAuxService[] =
 constexpr char kDefaultLandCompleteAuxService[] =
     "indooruav_mission/landing/land_complete";
 
+constexpr char kDefaultModeCommandService[] =
+    "indooruav_core/mode_manager/command";
+
 constexpr char kDefaultCmdVelTopic[] =
     "indooruav_controller/waypoint_tracker/cmd_vel";
 
@@ -197,6 +200,10 @@ void ControllerHardware::LoadParameters() {
     node_handle_.param<std::string>("/indooruav_controller/services/land_complete_aux",
                                     land_complete_aux_service_name_,
                                     kDefaultLandCompleteAuxService);
+
+    node_handle_.param<std::string>("/indooruav_controller/services/mode_command",
+                                    mode_command_service_name_,
+                                    kDefaultModeCommandService);
 
     node_handle_.param<std::string>("/indooruav_controller/topics/cmd_vel",
                                     cmd_vel_topic_,
@@ -335,6 +342,9 @@ void ControllerHardware::CreateServiceClients() {
         node_handle_.serviceClient<std_srvs::Empty>(check_failed_aux_service_name_);
     land_complete_aux_client_ =
         node_handle_.serviceClient<std_srvs::Empty>(land_complete_aux_service_name_);
+
+    mode_command_client_ =
+        node_handle_.serviceClient<indooruav_msgs::ModeCommand>(mode_command_service_name_);
 }
 
 void ControllerHardware::CreateSubscribersAndTimers() {
@@ -454,6 +464,117 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
 
     if (frame.cmd == drone_comm::CMD_ACK_CHECK_FAILED) {
         NotifyCheckFailed();
+    }
+
+    // ── 模式指令（建图/采点等 0x60 段）──────────────────────────
+    if (frame.cmd >= drone_comm::CMD_MAPPING_SET_NAME &&
+        frame.cmd <= drone_comm::CMD_LIST_WAYPOINTS) {
+        indooruav_msgs::ModeCommand srv;
+        switch (frame.cmd) {
+            case drone_comm::CMD_MAPPING_SET_NAME:
+                srv.request.command = "mapping_set_name";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
+                break;
+            case drone_comm::CMD_MAPPING_START:
+                srv.request.command = "mapping_start";
+                break;
+            case drone_comm::CMD_MAPPING_SAVE_MAP:
+                srv.request.command = "mapping_save_map";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
+                break;
+            case drone_comm::CMD_MAPPING_STOP:
+                srv.request.command = "mapping_stop";
+                break;
+            case drone_comm::CMD_LIST_MAPS:
+                srv.request.command = "list_maps";
+                break;
+            // ── 采点模式指令 ────────────────────────────────
+            case drone_comm::CMD_COLLECT_SET_MAP:
+                srv.request.command = "collect_set_map";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
+                break;
+            case drone_comm::CMD_COLLECT_SET_WP_NAME:
+                srv.request.command = "collect_set_wp_name";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
+                break;
+            case drone_comm::CMD_COLLECT_START:
+                srv.request.command = "collect_start";
+                break;
+            case drone_comm::CMD_COLLECT_GEN_2D:
+                srv.request.command = "collect_gen_2d";
+                break;
+            case drone_comm::CMD_COLLECT_GEN_PIXEL:
+                srv.request.command = "collect_gen_pixel";
+                break;
+            case drone_comm::CMD_COLLECT_STOP:
+                srv.request.command = "collect_stop";
+                break;
+            // ── 巡航模式指令 ────────────────────────────────
+            case drone_comm::CMD_CRUISE_SET_MAP:
+                srv.request.command = "cruise_set_map";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
+                break;
+            case drone_comm::CMD_CRUISE_SET_WP:
+                srv.request.command = "cruise_set_wp";
+                srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
+                break;
+            case drone_comm::CMD_CRUISE_START:
+                srv.request.command = "cruise_start";
+                break;
+            case drone_comm::CMD_LIST_WAYPOINTS:
+                srv.request.command = "list_waypoints";
+                break;
+        }
+
+        const bool ok = mode_command_client_.call(srv);
+        if (!ok) {
+            ROS_WARN("[ControllerHardware] mode command '%s' service call failed",
+                     srv.request.command.c_str());
+            uint8_t ack_frame[6];
+            ack_frame[0] = drone_comm::FRAME_HEADER;
+            ack_frame[1] = drone_comm::CMD_ACK;
+            ack_frame[2] = 2;
+            ack_frame[3] = frame.cmd;
+            ack_frame[4] = drone_comm::ACK_FAIL;
+            ack_frame[5] = ack_frame[0] ^ ack_frame[1] ^ ack_frame[2] ^ ack_frame[3] ^ ack_frame[4];
+            SendFrame(ack_frame, sizeof(ack_frame));
+            return;
+        }
+
+        // ★ list_maps / list_waypoints 等查询指令：回传响应内容
+        if (srv.request.command == "list_maps" ||
+            srv.request.command == "list_waypoints") {
+            const std::string& resp_msg = srv.response.message;
+            uint8_t resp_len = static_cast<uint8_t>(std::min<size_t>(resp_msg.size(), 240));
+            uint8_t resp_buf[4 + 240];
+            resp_buf[0] = drone_comm::FRAME_HEADER;
+            resp_buf[1] = (srv.request.command == "list_maps")
+                ? drone_comm::CMD_FILE_LIST_RESPONSE
+                : drone_comm::CMD_FILE_LIST_RESPONSE_WP;
+            resp_buf[2] = resp_len;
+            std::memcpy(resp_buf + 3, resp_msg.data(), resp_len);
+            uint8_t xor_val = 0;
+            for (uint8_t i = 0; i < static_cast<uint8_t>(3 + resp_len); ++i) {
+                xor_val ^= resp_buf[i];
+            }
+            resp_buf[3 + resp_len] = xor_val;
+            if (resp_len > 0) {
+                SendFrame(resp_buf, 4 + resp_len);
+            }
+        }
+
+        // 发送标准 ACK
+        const uint8_t status = srv.response.success ? drone_comm::ACK_OK : drone_comm::ACK_FAIL;
+        uint8_t ack_frame[6];
+        ack_frame[0] = drone_comm::FRAME_HEADER;
+        ack_frame[1] = drone_comm::CMD_ACK;
+        ack_frame[2] = 2;
+        ack_frame[3] = frame.cmd;
+        ack_frame[4] = status;
+        ack_frame[5] =
+            ack_frame[0] ^ ack_frame[1] ^ ack_frame[2] ^ ack_frame[3] ^ ack_frame[4];
+        SendFrame(ack_frame, sizeof(ack_frame));
+        return;
     }
 }
 
@@ -761,6 +882,18 @@ void ControllerHardware::SetVelForwardingEnabled(bool enabled) {
     if (!enabled) {
         vel_updated_ = false;
     }
+}
+
+bool ControllerHardware::SendModeCommand(const std::string& command, const std::string& payload) {
+    indooruav_msgs::ModeCommand srv;
+    srv.request.command = command;
+    srv.request.payload = payload;
+    if (!mode_command_client_.call(srv)) {
+        ROS_WARN("[ControllerHardware] SendModeCommand('%s') failed to call service",
+                 command.c_str());
+        return false;
+    }
+    return srv.response.success;
 }
 
 }  // namespace indooruav_controller
