@@ -553,39 +553,25 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
             return;
         }
 
-        // ★ list_maps / list_waypoints 等查询指令：回传响应内容（分片发送）
+        // ★ list_maps / list_waypoints 等查询指令：回传响应内容
         if (srv.request.command == "list_maps" ||
             srv.request.command == "list_waypoints") {
             const std::string& resp_msg = srv.response.message;
-            const uint8_t resp_cmd = (srv.request.command == "list_maps")
+            uint8_t resp_len = static_cast<uint8_t>(std::min<size_t>(resp_msg.size(), 240));
+            uint8_t resp_buf[4 + 240];
+            resp_buf[0] = drone_comm::FRAME_HEADER;
+            resp_buf[1] = (srv.request.command == "list_maps")
                 ? drone_comm::CMD_FILE_LIST_RESPONSE
                 : drone_comm::CMD_FILE_LIST_RESPONSE_WP;
-
-            constexpr uint8_t kChunkDataSize = 250;  // 每片数据上限（留 1 字节给 flag）
-            size_t offset = 0;
-            const size_t total = resp_msg.size();
-
-            while (offset < total) {
-                size_t remaining = total - offset;
-                uint8_t chunk_data_size = static_cast<uint8_t>(std::min<size_t>(remaining, kChunkDataSize));
-                bool is_last = (offset + chunk_data_size >= total);
-
-                uint8_t payload_len = 1 + chunk_data_size;  // flag + data
-                uint8_t buf[4 + 255];  // 最大帧长
-                buf[0] = drone_comm::FRAME_HEADER;
-                buf[1] = resp_cmd;
-                buf[2] = payload_len;
-                buf[3] = is_last ? 0 : 1;  // flag: 0=最后一片, 1=还有后续
-                if (chunk_data_size > 0) {
-                    std::memcpy(buf + 4, resp_msg.data() + offset, chunk_data_size);
-                }
-                uint8_t xor_val = 0;
-                for (uint8_t i = 0; i < static_cast<uint8_t>(3 + payload_len); ++i) {
-                    xor_val ^= buf[i];
-                }
-                buf[3 + payload_len] = xor_val;
-                SendFrame(buf, 4 + payload_len);
-                offset += chunk_data_size;
+            resp_buf[2] = resp_len;
+            std::memcpy(resp_buf + 3, resp_msg.data(), resp_len);
+            uint8_t xor_val = 0;
+            for (uint8_t i = 0; i < static_cast<uint8_t>(3 + resp_len); ++i) {
+                xor_val ^= resp_buf[i];
+            }
+            resp_buf[3 + resp_len] = xor_val;
+            if (resp_len > 0) {
+                SendFrame(resp_buf, 4 + resp_len);
             }
         }
 
