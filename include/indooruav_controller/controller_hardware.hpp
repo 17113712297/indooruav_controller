@@ -74,6 +74,9 @@ constexpr uint8_t CMD_CRUISE_SELECT_WP = 0x6F; // Android→ROS: 选择航线（
 constexpr uint8_t CMD_CRUISE_SET_SERVER = 0x70; // Android→ROS: 设置巡航服务器地址
 constexpr uint8_t CMD_CRUISE_SET_GIMBAL_PITCH = 0x71; // Android→ROS: 设置云台俯仰角
 
+// ★ 设置模式指令 (0x72)
+constexpr uint8_t CMD_SETTINGS_UPDATE = 0x72;  // Android→ROS: 修改 HTTP 配置参数
+
 // ★ 响应指令 (0x90-0x9F)
 constexpr uint8_t CMD_FILE_LIST_RESPONSE   = 0x90; // ROS→Android: 地图文件列表响应
 constexpr uint8_t CMD_FILE_LIST_RESPONSE_WP = 0x91; // ROS→Android: 航线文件列表响应
