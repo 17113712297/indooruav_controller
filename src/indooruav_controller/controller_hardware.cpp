@@ -466,9 +466,9 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
         NotifyCheckFailed();
     }
 
-    // ── 模式指令（建图/采点等 0x60 段）──────────────────────────
+    // ── 模式指令（建图/采点/设置 0x60 段）──────────────────────────
     if (frame.cmd >= drone_comm::CMD_MAPPING_SET_NAME &&
-        frame.cmd <= drone_comm::CMD_SETTINGS_UPDATE) {
+        frame.cmd <= drone_comm::CMD_SETTINGS_RESTART_HTTP) {
         indooruav_msgs::ModeCommand srv;
         switch (frame.cmd) {
             case drone_comm::CMD_MAPPING_SET_NAME:
@@ -541,6 +541,12 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
                 srv.request.command = "settings_update";
                 srv.request.payload = std::string(reinterpret_cast<const char*>(frame.payload), frame.len);
                 break;
+            case drone_comm::CMD_SETTINGS_GET:
+                srv.request.command = "settings_get";
+                break;
+            case drone_comm::CMD_SETTINGS_RESTART_HTTP:
+                srv.request.command = "settings_restart_http";
+                break;
         }
 
         const bool ok = mode_command_client_.call(srv);
@@ -558,16 +564,21 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
             return;
         }
 
-        // ★ list_maps / list_waypoints 等查询指令：回传响应内容
+        // ★ list_maps / list_waypoints / settings_get 等查询指令：回传响应内容
         if (srv.request.command == "list_maps" ||
-            srv.request.command == "list_waypoints") {
+            srv.request.command == "list_waypoints" ||
+            srv.request.command == "settings_get") {
             const std::string& resp_msg = srv.response.message;
             uint8_t resp_len = static_cast<uint8_t>(std::min<size_t>(resp_msg.size(), 240));
             uint8_t resp_buf[4 + 240];
             resp_buf[0] = drone_comm::FRAME_HEADER;
-            resp_buf[1] = (srv.request.command == "list_maps")
-                ? drone_comm::CMD_FILE_LIST_RESPONSE
-                : drone_comm::CMD_FILE_LIST_RESPONSE_WP;
+            if (srv.request.command == "list_maps") {
+                resp_buf[1] = drone_comm::CMD_FILE_LIST_RESPONSE;
+            } else if (srv.request.command == "list_waypoints") {
+                resp_buf[1] = drone_comm::CMD_FILE_LIST_RESPONSE_WP;
+            } else {
+                resp_buf[1] = drone_comm::CMD_SETTINGS_RESPONSE;
+            }
             resp_buf[2] = resp_len;
             std::memcpy(resp_buf + 3, resp_msg.data(), resp_len);
             uint8_t xor_val = 0;
