@@ -1,6 +1,6 @@
 /**
  * @file  controller_hardware.cpp
- * @brief PSDK <-> MSDK bridge implementation.
+ * @brief PSDK <-> MSDK bridge implementation.1
  */
 #include "indooruav_controller/controller_hardware.hpp"
 

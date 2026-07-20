@@ -1,6 +1,6 @@
 /**
  * @file  controller_hardware.hpp
- * @brief PSDK <-> MSDK bridge node.
+ * @brief PSDK <-> MSDK bridge node.1
  */
 #pragma once
 
