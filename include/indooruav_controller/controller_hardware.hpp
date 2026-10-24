@@ -12,6 +12,7 @@
 
 #include <geometry_msgs/Twist.h>
 #include <ros/ros.h>
+#include <std_msgs/String.h>
 #include <std_srvs/Empty.h>
 #include <std_srvs/Trigger.h>
 
@@ -78,6 +79,21 @@ constexpr uint8_t CMD_CRUISE_SET_GIMBAL_PITCH = 0x71; // Android→ROS: 设置�
 constexpr uint8_t CMD_SETTINGS_UPDATE = 0x72;  // Android→ROS: 修改 HTTP 配置参数
 constexpr uint8_t CMD_SETTINGS_GET = 0x73;     // Android→ROS: 获取 HTTP 配置参数
 constexpr uint8_t CMD_SETTINGS_RESTART_HTTP = 0x74; // Android→ROS: 重启 HTTP 服务
+
+// ★ 任务控制指令 (0x75-0x77) —— 遥控器三个按键
+//   直接转成 indooruav_core 状态机事件服务：
+//     pause  : Cruise → Paused（悬停，保留航点索引）
+//     resume : Paused → Cruise（从原航点继续）
+//     return : Paused → Return（反向重放航点回到第一个点，仅暂停态可用）
+constexpr uint8_t CMD_PAUSE  = 0x75;
+constexpr uint8_t CMD_RESUME = 0x76;
+constexpr uint8_t CMD_RETURN = 0x77;
+
+// ★ 任务状态上报 (0x93) —— ROS→RC
+//   payload: [state:1][wp_index:1][wp_total:1][reserved:1]
+//   state 码 = indooruav_core State 枚举序号（Await=0 … Charge=8）
+constexpr uint8_t CMD_MISSION_STATE = 0x93;
+constexpr uint8_t MISSION_STATE_PAYLOAD_LEN = 4;
 
 // ★ 响应指令 (0x90-0x9F)
 constexpr uint8_t CMD_FILE_LIST_RESPONSE   = 0x90; // ROS→Android: 地图文件列表响应
@@ -162,6 +178,13 @@ struct CamZoomPayload {
 struct AuxLightPayload {
     uint8_t mode;
 };
+
+struct MissionStatePayload {
+    uint8_t state;
+    uint8_t wp_index;
+    uint8_t wp_total;
+    uint8_t reserved;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(VelPayload) == 16, "VelPayload must be 16 bytes");
@@ -172,6 +195,8 @@ static_assert(sizeof(CamRecordPayload) == 1, "CamRecordPayload must be 1 byte");
 static_assert(sizeof(CamVideoCfgPayload) == 2, "CamVideoCfgPayload must be 2 bytes");
 static_assert(sizeof(CamZoomPayload) == 8, "CamZoomPayload must be 8 bytes");
 static_assert(sizeof(AuxLightPayload) == 1, "AuxLightPayload must be 1 byte");
+static_assert(sizeof(MissionStatePayload) == MISSION_STATE_PAYLOAD_LEN,
+              "MissionStatePayload must be 4 bytes");
 
 inline uint8_t encode_simple(uint8_t cmd, uint8_t* buf, uint8_t buf_len) {
     if (buf_len < 4) {
@@ -324,6 +349,13 @@ private:
     void NotifyCheckPassed();
     void NotifyCheckFailed();
 
+    // ★ 任务控制：状态机状态 → 0x93 帧回传遥控器
+    void OnMissionStateMsg(const std_msgs::String::ConstPtr& message);
+    void OnTrackerStatusMsg(const std_msgs::String::ConstPtr& message);
+    void OnMissionStateTimer(const ros::TimerEvent& event);
+    void SendMissionState();
+    bool HandleMissionCommand(uint8_t cmd);
+
     void OnCmdVel(const geometry_msgs::Twist::ConstPtr& message);
     void OnVelSendTimer(const ros::TimerEvent& event);
 
@@ -410,6 +442,14 @@ private:
     std::string check_failed_aux_service_name_;
     std::string land_complete_aux_service_name_;
 
+    // ★ 任务控制（暂停/继续/返航）：状态机事件服务
+    std::string mission_pause_service_name_;
+    std::string mission_resume_service_name_;
+    std::string mission_return_service_name_;
+
+    std::string mission_state_topic_;
+    std::string tracker_status_topic_;
+
     // ★ 建图模式
     std::string mode_command_service_name_;
     bool SendModeCommand(const std::string& command, const std::string& payload);
@@ -447,6 +487,22 @@ private:
     ros::ServiceClient check_failed_aux_client_;
     ros::ServiceClient land_complete_aux_client_;
     ros::ServiceClient mode_command_client_;
+
+    // ★ 任务控制客户端
+    ros::ServiceClient mission_pause_client_;
+    ros::ServiceClient mission_resume_client_;
+    ros::ServiceClient mission_return_client_;
+
+    ros::Subscriber mission_state_subscriber_;
+    ros::Subscriber tracker_status_subscriber_;
+    ros::Timer      mission_state_timer_;
+
+    // 状态缓存：由 ROS 回调写入，定时器读取后打包成 0x93 帧
+    // 初值 0xFF 表示"还没收到过状态机状态"，遥控器据此放开三个按键便于调试
+    std::atomic<uint8_t> mission_state_code_{0xFF};
+    std::atomic<uint8_t> mission_wp_index_{0};
+    std::atomic<uint8_t> mission_wp_total_{0};
+    double mission_state_rate_hz_ = 1.0;
 
     ros::Subscriber cmd_vel_subscriber_;
     ros::Timer      vel_send_timer_;

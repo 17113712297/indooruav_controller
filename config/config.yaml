@@ -40,12 +40,22 @@ indooruav_controller:
     check_failed_aux: "indooruav_mission/preflight_check/check_failed"
     land_complete_aux: "indooruav_mission/landing/land_complete"
 
+    # ★ 任务控制（遥控器暂停/继续/返航按键）→ 直接打状态机事件
+    mission_pause:  "indooruav_core/state_machine_event/pause"
+    mission_resume: "indooruav_core/state_machine_event/resume"
+    mission_return: "indooruav_core/state_machine_event/return"
+
   topics:
     cmd_vel: "indooruav_controller/waypoint_tracker/cmd_vel"
     http_device_state: "/indooruav_controller/http/device_state"
+    # ★ 任务状态上报源（打包成 0x93 帧回传遥控器）
+    mission_state:  "/indooruav_core/state_machine/state"
+    tracker_status: "/indooruav_controller/waypoint_tracker/status"
 
   parameters:
     vel_send_rate_hz: 10.0
+    # 0x93 状态上报频率（Hz），遥控器按钮置灰依赖它
+    mission_state_rate_hz: 1.0
     media_camera_mount_position: -1
     media_time_tolerance_sec: 5.0
     media_file_wait_timeout_sec: 60.0

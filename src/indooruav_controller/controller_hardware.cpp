@@ -4,7 +4,9 @@
  */
 #include "indooruav_controller/controller_hardware.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace indooruav_controller {
@@ -79,6 +81,19 @@ constexpr char kDefaultLandCompleteAuxService[] =
 
 constexpr char kDefaultModeCommandService[] =
     "indooruav_core/mode_manager/command";
+
+// ★ 任务控制（暂停/继续/返航）——直接打状态机事件服务，不经过 mode_manager
+constexpr char kDefaultMissionPauseService[] =
+    "indooruav_core/state_machine_event/pause";
+constexpr char kDefaultMissionResumeService[] =
+    "indooruav_core/state_machine_event/resume";
+constexpr char kDefaultMissionReturnService[] =
+    "indooruav_core/state_machine_event/return";
+
+constexpr char kDefaultMissionStateTopic[] =
+    "/indooruav_core/state_machine/state";
+constexpr char kDefaultTrackerStatusTopic[] =
+    "/indooruav_controller/waypoint_tracker/status";
 
 constexpr char kDefaultCmdVelTopic[] =
     "indooruav_controller/waypoint_tracker/cmd_vel";
@@ -204,6 +219,29 @@ void ControllerHardware::LoadParameters() {
     node_handle_.param<std::string>("/indooruav_controller/services/mode_command",
                                     mode_command_service_name_,
                                     kDefaultModeCommandService);
+
+    // ★ 任务控制（暂停/继续/返航）
+    node_handle_.param<std::string>("/indooruav_controller/services/mission_pause",
+                                    mission_pause_service_name_,
+                                    kDefaultMissionPauseService);
+    node_handle_.param<std::string>("/indooruav_controller/services/mission_resume",
+                                    mission_resume_service_name_,
+                                    kDefaultMissionResumeService);
+    node_handle_.param<std::string>("/indooruav_controller/services/mission_return",
+                                    mission_return_service_name_,
+                                    kDefaultMissionReturnService);
+    node_handle_.param<std::string>("/indooruav_controller/topics/mission_state",
+                                    mission_state_topic_,
+                                    kDefaultMissionStateTopic);
+    node_handle_.param<std::string>("/indooruav_controller/topics/tracker_status",
+                                    tracker_status_topic_,
+                                    kDefaultTrackerStatusTopic);
+    node_handle_.param<double>("/indooruav_controller/parameters/mission_state_rate_hz",
+                               mission_state_rate_hz_,
+                               1.0);
+    if (mission_state_rate_hz_ < 0.2) {
+        mission_state_rate_hz_ = 0.2;
+    }
 
     node_handle_.param<std::string>("/indooruav_controller/topics/cmd_vel",
                                     cmd_vel_topic_,
@@ -345,6 +383,14 @@ void ControllerHardware::CreateServiceClients() {
 
     mode_command_client_ =
         node_handle_.serviceClient<indooruav_msgs::ModeCommand>(mode_command_service_name_);
+
+    // ★ 任务控制客户端
+    mission_pause_client_ =
+        node_handle_.serviceClient<std_srvs::Empty>(mission_pause_service_name_);
+    mission_resume_client_ =
+        node_handle_.serviceClient<std_srvs::Empty>(mission_resume_service_name_);
+    mission_return_client_ =
+        node_handle_.serviceClient<std_srvs::Empty>(mission_return_service_name_);
 }
 
 void ControllerHardware::CreateSubscribersAndTimers() {
@@ -354,6 +400,17 @@ void ControllerHardware::CreateSubscribersAndTimers() {
     vel_send_timer_ = node_handle_.createTimer(
         ros::Duration(1.0 / vel_send_rate_hz_),
         &ControllerHardware::OnVelSendTimer,
+        this);
+
+    // ★ 任务状态：订阅状态机与追踪器，打包成 0x93 周期回传遥控器
+    mission_state_subscriber_ = node_handle_.subscribe<std_msgs::String>(
+        mission_state_topic_, 1, &ControllerHardware::OnMissionStateMsg, this);
+    tracker_status_subscriber_ = node_handle_.subscribe<std_msgs::String>(
+        tracker_status_topic_, 1, &ControllerHardware::OnTrackerStatusMsg, this);
+
+    mission_state_timer_ = node_handle_.createTimer(
+        ros::Duration(1.0 / mission_state_rate_hz_),
+        &ControllerHardware::OnMissionStateTimer,
         this);
 }
 
@@ -464,6 +521,25 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
 
     if (frame.cmd == drone_comm::CMD_ACK_CHECK_FAILED) {
         NotifyCheckFailed();
+    }
+
+    // ── 任务控制指令（暂停/继续/返航 0x75-0x77）────────────────────
+    //   直接转成状态机事件，不经过 mode_manager（mode_manager 只管进程生命周期）
+    if (frame.cmd == drone_comm::CMD_PAUSE ||
+        frame.cmd == drone_comm::CMD_RESUME ||
+        frame.cmd == drone_comm::CMD_RETURN) {
+        const bool ok = HandleMissionCommand(frame.cmd);
+
+        uint8_t ack_frame[6];
+        ack_frame[0] = drone_comm::FRAME_HEADER;
+        ack_frame[1] = drone_comm::CMD_ACK;
+        ack_frame[2] = 2;
+        ack_frame[3] = frame.cmd;
+        ack_frame[4] = ok ? drone_comm::ACK_OK : drone_comm::ACK_FAIL;
+        ack_frame[5] =
+            ack_frame[0] ^ ack_frame[1] ^ ack_frame[2] ^ ack_frame[3] ^ ack_frame[4];
+        SendFrame(ack_frame, sizeof(ack_frame));
+        return;
     }
 
     // ── 模式指令（建图/采点/设置 0x60 段）──────────────────────────
@@ -604,6 +680,124 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
         SendFrame(ack_frame, sizeof(ack_frame));
         return;
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  任务控制（暂停 / 继续 / 返航）
+// ═══════════════════════════════════════════════════════════════
+
+// 把 0x75/0x76/0x77 转成状态机事件服务调用。
+//
+// 注意：服务类型是 std_srvs/Empty，返回值只能表示"调用是否送达"，
+// 不能表示状态机是否接受。例如巡航中收到返航，状态机会打印 [Reject]
+// 但仍然返回 true。所以这里的 ACK_OK 等价于"已送达"，不代表"已执行"。
+// 真实状态以随后的 0x93 上报为准。
+bool ControllerHardware::HandleMissionCommand(uint8_t cmd) {
+    ros::ServiceClient* client = nullptr;
+    const char* label = "";
+
+    switch (cmd) {
+        case drone_comm::CMD_PAUSE:
+            client = &mission_pause_client_;
+            label = "pause";
+            break;
+        case drone_comm::CMD_RESUME:
+            client = &mission_resume_client_;
+            label = "resume";
+            break;
+        case drone_comm::CMD_RETURN:
+            client = &mission_return_client_;
+            label = "return";
+            break;
+        default:
+            return false;
+    }
+
+    if (!client->exists()) {
+        ROS_WARN("[ControllerHardware] mission '%s' rejected: service not available", label);
+        return false;
+    }
+
+    std_srvs::Empty srv;
+    if (!client->call(srv)) {
+        ROS_WARN("[ControllerHardware] mission '%s' service call failed", label);
+        return false;
+    }
+
+    ROS_INFO("[ControllerHardware] mission '%s' forwarded to state machine", label);
+    return true;
+}
+
+// 状态机状态字符串 → 状态码（与 indooruav_core State 枚举顺序一致）
+void ControllerHardware::OnMissionStateMsg(const std_msgs::String::ConstPtr& message) {
+    static const struct {
+        const char* name;
+        uint8_t code;
+    } kStateTable[] = {
+        {"Await", 0},
+        {"CheckBeforeTakeOff", 1},
+        {"TakeOff", 2},
+        {"Cruise", 3},
+        {"DataCollection", 4},
+        {"Paused", 5},
+        {"Return", 6},
+        {"Land", 7},
+        {"Charge", 8},
+    };
+
+    for (const auto& entry : kStateTable) {
+        if (message->data == entry.name) {
+            mission_state_code_.store(entry.code, std::memory_order_relaxed);
+            return;
+        }
+    }
+    ROS_WARN_THROTTLE(10.0,
+                      "[ControllerHardware] unknown mission state string: '%s'",
+                      message->data.c_str());
+}
+
+// 追踪器状态 JSON 解析：{"state":"RUNNING","index":3,"total":12,"reverse":false}
+// 格式由 indooruav_waypoint 固定生成，这里只取两个整数，不做通用 JSON 解析。
+void ControllerHardware::OnTrackerStatusMsg(const std_msgs::String::ConstPtr& message) {
+    const std::string& text = message->data;
+
+    const size_t index_pos = text.find("\"index\":");
+    if (index_pos != std::string::npos) {
+        const int value = std::atoi(text.c_str() + index_pos + 8);
+        mission_wp_index_.store(static_cast<uint8_t>(std::max(0, std::min(255, value))),
+                                std::memory_order_relaxed);
+    }
+
+    const size_t total_pos = text.find("\"total\":");
+    if (total_pos != std::string::npos) {
+        const int value = std::atoi(text.c_str() + total_pos + 8);
+        mission_wp_total_.store(static_cast<uint8_t>(std::max(0, std::min(255, value))),
+                                std::memory_order_relaxed);
+    }
+}
+
+void ControllerHardware::OnMissionStateTimer(const ros::TimerEvent& event) {
+    (void)event;
+    SendMissionState();
+}
+
+void ControllerHardware::SendMissionState() {
+    drone_comm::MissionStatePayload payload{};
+    payload.state = mission_state_code_.load(std::memory_order_relaxed);
+    payload.wp_index = mission_wp_index_.load(std::memory_order_relaxed);
+    payload.wp_total = mission_wp_total_.load(std::memory_order_relaxed);
+    payload.reserved = 0;
+
+    uint8_t buf[4 + drone_comm::MISSION_STATE_PAYLOAD_LEN];
+    const uint8_t len = drone_comm::encode_payload(drone_comm::CMD_MISSION_STATE,
+                                                  &payload,
+                                                  sizeof(payload),
+                                                  buf,
+                                                  sizeof(buf));
+    if (len == 0) {
+        return;
+    }
+    SendFrame(buf, len);
 }
 
 void ControllerHardware::NotifyTakeoffComplete() {
