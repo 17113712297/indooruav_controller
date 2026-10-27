@@ -3,6 +3,7 @@
  * @brief PSDK <-> MSDK bridge implementation.1
  */
 #include "indooruav_controller/controller_hardware.hpp"
+#include "indooruav_controller/file_list_paging.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -545,6 +546,17 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
     // ── 模式指令（建图/采点/设置 0x60 段）──────────────────────────
     if (frame.cmd >= drone_comm::CMD_MAPPING_SET_NAME &&
         frame.cmd <= drone_comm::CMD_SETTINGS_RESTART_HTTP) {
+        // ★ 文件列表分页：0x64/0x6E 若带 2 字节载荷，则 payload = [offset:u16 LE]。
+        //   不带载荷 = 老版本遥控器 → 仍按旧格式回（截断 240 B 的单帧）。
+        const bool list_request = (frame.cmd == drone_comm::CMD_LIST_MAPS ||
+                                   frame.cmd == drone_comm::CMD_LIST_WAYPOINTS);
+        const bool paginated = list_request && frame.len >= 2;
+        uint16_t page_offset = 0;
+        if (paginated) {
+            page_offset = static_cast<uint16_t>(frame.payload[0]) |
+                          (static_cast<uint16_t>(frame.payload[1]) << 8);
+        }
+
         indooruav_msgs::ModeCommand srv;
         switch (frame.cmd) {
             case drone_comm::CMD_MAPPING_SET_NAME:
@@ -640,21 +652,18 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
             return;
         }
 
-        // ★ list_maps / list_waypoints / settings_get 等查询指令：回传响应内容
+        // ★ 查询类指令：回传响应内容
+        //    list_maps / list_waypoints → 支持分页（0x94/0x95）
+        //    settings_get              → 仍是单帧 0x92（配置串很短，不需要分页）
         if (srv.request.command == "list_maps" ||
-            srv.request.command == "list_waypoints" ||
-            srv.request.command == "settings_get") {
+            srv.request.command == "list_waypoints") {
+            SendFileListResponse(frame.cmd, srv.response.message, page_offset, paginated);
+        } else if (srv.request.command == "settings_get") {
             const std::string& resp_msg = srv.response.message;
             uint8_t resp_len = static_cast<uint8_t>(std::min<size_t>(resp_msg.size(), 240));
             uint8_t resp_buf[4 + 240];
             resp_buf[0] = drone_comm::FRAME_HEADER;
-            if (srv.request.command == "list_maps") {
-                resp_buf[1] = drone_comm::CMD_FILE_LIST_RESPONSE;
-            } else if (srv.request.command == "list_waypoints") {
-                resp_buf[1] = drone_comm::CMD_FILE_LIST_RESPONSE_WP;
-            } else {
-                resp_buf[1] = drone_comm::CMD_SETTINGS_RESPONSE;
-            }
+            resp_buf[1] = drone_comm::CMD_SETTINGS_RESPONSE;
             resp_buf[2] = resp_len;
             std::memcpy(resp_buf + 3, resp_msg.data(), resp_len);
             uint8_t xor_val = 0;
@@ -680,6 +689,74 @@ void ControllerHardware::OnRecvFromMsdk(const uint8_t* data, uint16_t len) {
         SendFrame(ack_frame, sizeof(ack_frame));
         return;
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  文件列表回包（分页 / 旧格式兼容）
+// ═══════════════════════════════════════════════════════════════
+//
+// 遥控器请求 0x64/0x6E 时：
+//   * 带 2 字节 offset → 回分页帧 0x94/0x95：
+//       [offset:u16][next:u16][name\nname\n...]（payload ≤ 240 B）
+//     next == 0xFFFF 表示没有下一页。
+//   * 不带 offset（老版本 App）→ 回旧格式 0x90/0x91，截断到 240 B。
+//
+// 为什么按"条"切而不是按字节切：按字节切会把最后一个文件名切成两半，
+// 遥控器会显示一个点进去必然失败的幽灵条目（这正是改造前的老毛病）。
+void ControllerHardware::SendFileListResponse(uint8_t req_cmd,
+                                              const std::string& full_list,
+                                              uint16_t offset,
+                                              bool paginated) {
+    const bool is_map = (req_cmd == drone_comm::CMD_LIST_MAPS);
+    const uint8_t legacy_cmd = is_map ? drone_comm::CMD_FILE_LIST_RESPONSE
+                                      : drone_comm::CMD_FILE_LIST_RESPONSE_WP;
+
+    if (!paginated) {
+        // ── 旧格式：老遥控器，单帧截断 ──────────────────────────
+        uint8_t resp_len = static_cast<uint8_t>(
+            std::min<std::size_t>(full_list.size(), 240));
+        if (resp_len == 0) return;
+        uint8_t resp_buf[4 + 240];
+        resp_buf[0] = drone_comm::FRAME_HEADER;
+        resp_buf[1] = legacy_cmd;
+        resp_buf[2] = resp_len;
+        std::memcpy(resp_buf + 3, full_list.data(), resp_len);
+        uint8_t xor_val = 0;
+        for (uint8_t i = 0; i < static_cast<uint8_t>(3 + resp_len); ++i) {
+            xor_val ^= resp_buf[i];
+        }
+        resp_buf[3 + resp_len] = xor_val;
+        SendFrame(resp_buf, 4 + resp_len);
+        return;
+    }
+
+    // ── 分页格式 ────────────────────────────────────────────────
+    const std::vector<std::string> names = indooruav_paging::SplitList(full_list);
+    const indooruav_paging::Page page =
+        indooruav_paging::BuildPage(names, offset, drone_comm::FILE_LIST_MAX_TEXT_LEN);
+
+    const uint8_t page_cmd = is_map ? drone_comm::CMD_FILE_LIST_PAGE
+                                    : drone_comm::CMD_FILE_LIST_PAGE_WP;
+    const std::vector<uint8_t> frame =
+        indooruav_paging::BuildFrame(page_cmd, drone_comm::FRAME_HEADER, page);
+
+    if (frame.size() > 4 + drone_comm::MAX_PAYLOAD_LEN ||
+        !indooruav_paging::VerifyFrame(frame, drone_comm::FRAME_HEADER)) {
+        ROS_ERROR("[ControllerHardware] file list frame invalid (%zu B), dropped",
+                  frame.size());
+        return;
+    }
+
+    SendFrame(frame.data(), static_cast<uint8_t>(frame.size()));
+
+    if (offset > names.size()) {
+        ROS_WARN("[ControllerHardware] file list offset %u out of range (%zu items)",
+                 static_cast<unsigned>(offset), names.size());
+    }
+    ROS_DEBUG("[ControllerHardware] %s list page: offset=%u count=%zu next=%u total=%zu",
+              is_map ? "map" : "waypoint",
+              static_cast<unsigned>(page.offset), page.count,
+              static_cast<unsigned>(page.next), names.size());
 }
 
 // ═══════════════════════════════════════════════════════════════

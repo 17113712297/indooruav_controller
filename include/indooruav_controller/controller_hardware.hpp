@@ -96,9 +96,22 @@ constexpr uint8_t CMD_MISSION_STATE = 0x93;
 constexpr uint8_t MISSION_STATE_PAYLOAD_LEN = 4;
 
 // ★ 响应指令 (0x90-0x9F)
-constexpr uint8_t CMD_FILE_LIST_RESPONSE   = 0x90; // ROS→Android: 地图文件列表响应
-constexpr uint8_t CMD_FILE_LIST_RESPONSE_WP = 0x91; // ROS→Android: 航线文件列表响应
+constexpr uint8_t CMD_FILE_LIST_RESPONSE   = 0x90; // ROS→Android: 地图文件列表响应（旧格式，无分页）
+constexpr uint8_t CMD_FILE_LIST_RESPONSE_WP = 0x91; // ROS→Android: 航线文件列表响应（旧格式，无分页）
 constexpr uint8_t CMD_SETTINGS_RESPONSE     = 0x92; // ROS→Android: 设置参数响应
+
+// ★ 文件列表分页响应 (0x94/0x95) —— 新增，见 file_list_paging.hpp
+//   请求 0x64 / 0x6E 若带 2 字节 payload，则 payload = [offset:u16 LE]（已收到的条数），
+//   此时按分页格式回包：
+//     payload = [offset:u16][next:u16][name\nname\n...]
+//     next == 0xFFFF 表示没有下一页；RC 收到 next 后继续请求下一页。
+//   请求不带 payload（老版本遥控器）时仍回旧格式 0x90/0x91，保证向下兼容。
+constexpr uint8_t CMD_FILE_LIST_PAGE      = 0x94;
+constexpr uint8_t CMD_FILE_LIST_PAGE_WP   = 0x95;
+constexpr uint8_t FILE_LIST_PAGE_HEADER_LEN = 4;
+constexpr uint16_t FILE_LIST_NO_MORE      = 0xFFFF;
+constexpr uint8_t FILE_LIST_MAX_TEXT_LEN  = 236;  // 240(payload 上限) - 4(分页头)
+
 constexpr uint8_t CMD_ACK                    = 0x80;
 constexpr uint8_t CMD_ACK_TAKEOFF_COMPLETE   = 0x81;
 constexpr uint8_t CMD_ACK_LAND_COMPLETE      = 0x82;
@@ -396,6 +409,20 @@ private:
                                std_srvs::Empty::Response& response);
 
     bool SendFrame(const uint8_t* buf, uint8_t len);
+
+    /**
+     * 回文件列表（0x90/0x91 旧格式，或 0x94/0x95 分页格式）。
+     *
+     * @param req_cmd   触发本次回包的请求命令（0x64 或 0x6E）
+     * @param full_list mode_manager 返回的整串（逗号分隔）
+     * @param offset    分页起始条数（仅 paginated 时有效）
+     * @param paginated true = 遥控器请求里带了 offset，按分页回
+     */
+    void SendFileListResponse(uint8_t req_cmd,
+                              const std::string& full_list,
+                              uint16_t offset,
+                              bool paginated);
+
     bool CallEmptyService(ros::ServiceClient& client,
                           const std::string& service_name,
                           const char* service_label);
